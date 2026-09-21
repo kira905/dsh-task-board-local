@@ -1,0 +1,2 @@
+# Keep line endings identical on every platform that checks this repo out.
+* text=auto eol=lf
