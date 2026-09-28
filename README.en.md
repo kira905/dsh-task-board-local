@@ -1,6 +1,7 @@
 # dsh-task-board-local
 
-> **Status**: publish candidate (ready locally · no public repository created · nothing pushed yet)
+> **Status**: published · latest release `v1.1.1` (Gitee + GitHub)
+> **Repository**: <https://github.com/kira905/dsh-task-board-local> ｜ <https://gitee.com/kira905/dsh-task-board-local>
 > **Upstream**: `@linxin666/dsh-client-ui-task-board` 0.3.4 (Apache-2.0) — this is a **detached fork**: it does not follow upstream releases and versions independently from 1.0.0 on
 > **License**: Apache-2.0 — see [`LICENSE`](./LICENSE) and [`NOTICE`](./NOTICE) (the NOTICE carries the upstream attribution and the statement of changes)
 > **中文**: [README.md](./README.md)
@@ -15,6 +16,7 @@ This component is one implementation of the system described in
 - **Why it exists and where its boundary is** → see *Autonomous Operations Steward* §4 (three object types + the autonomy spectrum): what may be handed to an agent, and where a human gate must stay
 - **Its compatibility window with the host** → see *Multi-machine Handoff and Cloud Relay* §4.5 "compatibility requirements" (four rules): declare a supported range and probe at runtime instead of binding statically
 - **This component's own pitfalls and measurements** → the "Known limitations" section below; the upstream project's issue tracker
+- **How its completion / interruption judgments work, and how they fail** → see *Telling a "finished" task card from a lie, and an interrupted session from a closed one*: what an empty execution record actually means (three legitimate causes), the three cross-evidence checks for "did this card really get done", and why "interrupted" must be judged from the **tail event chain** rather than from the last event
 
 ## What this is / who it is for / how to read it
 
@@ -132,6 +134,23 @@ Two honest notes:
 2. After forking, the reported package name was left unchanged, so those heartbeats count as the
    upstream package in upstream statistics. Whether to switch the identifier to this fork is an open
    release decision.
+
+## Related components
+
+Sibling components in the same ecosystem — separate repositories, separate versions, separate licenses. All of them link back to the same documentation repository,
+[`ops-handoff-design`](https://github.com/kira905/ops-handoff-design)
+(Gitee mirror: <https://gitee.com/kira905/ops-handoff-design>):
+
+| Repository | What it does | How it relates to this one |
+|---|---|---|
+| `dsh-task-board-local` | Self-maintained task board (a card = a real session + a human acceptance gate) | **this repo** |
+| [`dsh-session-title-live`](https://github.com/kira905/dsh-session-title-live) | Live session titles with running/done state prefixes | **This board's readability depends on it**: where a card got to — and whether it closed — is read off the executed session's title. If titles cannot be trusted, progress on the board is just a sentence. |
+| [`dsh-ecosystem-panel`](https://github.com/kira905/dsh-ecosystem-panel) | Read-only ecosystem health panel (six checks in one view) | **This repo is a typical subject of it** (self-built, registered through an `insert` patch): "did the plugin actually load" is exactly the class of silent failure it answers. |
+| [`dsh-diagnostic-tools`](https://github.com/kira905/dsh-diagnostic-tools) | Dependency-closure / decoupling checks + chat image attachment reconciliation | Run it before and after a host upgrade; this repo's compatibility layer (`src/settings-compat.ts`) is the runtime defence against the same class of breakage. |
+| [`dsh-butler-archive`](https://github.com/kira905/dsh-butler-archive) | Session archiving (list / preview / restore / delete, optional auto-archive) | Cards produce sessions in bulk; that component moves idle ones out of the session directory so startup and load cost does not grow linearly with card count. |
+| [`dsh-firstaid`](https://github.com/kira905/dsh-firstaid) | Zero-dependency incident toolkit (four on-site scenarios behind one entry point) | The fallback: this board depends on a resident host — **if the host wedges, the board is just a spinning page**. Run that one first, then decide whether to act. |
+
+> There are **no code dependencies** between these components and they share no runtime. They point at each other because they answer the same class of question for the same kind of person (running an agent on your own machine for months: install it, find it, see it, diagnose it). Installing one does not affect the others.
 
 ## License
 

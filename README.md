@@ -1,6 +1,6 @@
 # dsh-task-board-local
 
-> **状态**：已开源 · 最新发布 `v1.1.0`（Gitee + GitHub 双端）
+> **状态**：已开源 · 最新发布 `v1.1.1`（Gitee + GitHub 双端）
 > **仓库**：<https://github.com/kira905/dsh-task-board-local> ｜ <https://gitee.com/kira905/dsh-task-board-local>
 > **上游**：`@linxin666/dsh-client-ui-task-board` 0.3.4（Apache-2.0）—— 本仓是**已脱离上游版本线**的 fork，版本号自 1.0.0 起独立
 > **许可**：Apache-2.0（见 [`LICENSE`](./LICENSE) 与 [`NOTICE`](./NOTICE)，NOTICE 内含上游署名与改动声明）
@@ -15,6 +15,7 @@
 - **它为什么存在、边界在哪** → 见《自治式运维管家》§4（对象三型 + 自治光谱）：哪些事可以交给 agent 自己跑、哪些必须留一个人类闸门
 - **它与宿主版本的兼容区间** → 见《多机交接与云中继》§4.5「兼容性要求」（四条）：插件声明宿主版本区间、运行时探测而不是静态绑定
 - **本组件特有的坑与实测** → 本仓 README「已知限制」一节；上游项目的 issue 区
+- **它的判定规则与已知失效形态** → 见《任务卡「假完成」与「被打断会话」的识别》：一张卡「执行记录为空」意味着什么（**三类合法成因**）、判定"卡到底干没干完"的**三条横切证据法**，以及"被打断"该按**尾部事件链**判而不是看最后一条事件
 
 ## 这是什么 / 给谁看 / 怎么读
 
@@ -121,6 +122,24 @@ dsh plugin --profile web add dsh-task-board-local@<version>
 
 1. 本仓是从上游继承该逻辑的，**没有开关**；要完全关闭需要自行去掉 `src/client/index.ts` 里的调用（或以构建期替换掉该模块）。
 2. 本仓 fork 后仍未改上报的包名，因此这些心跳在上游的统计里会算作上游包。是否改为本仓自己的标识，属发布前待定项。
+
+## 相关组件
+
+同属 DSH 生态的伴生组件，各自独立仓、独立版本、许可各自独立；它们都回链到同一份文档仓
+[`ops-handoff-design`](https://github.com/kira905/ops-handoff-design)
+（Gitee 镜像 <https://gitee.com/kira905/ops-handoff-design>）：
+
+| 组件仓 | 做什么 | 与本组件的关系 |
+|---|---|---|
+| `dsh-task-board-local` | 自维护任务看板（卡片 = 一次真实会话 + 人工验收闸） | **本仓** |
+| [`dsh-session-title-live`](https://github.com/kira905/dsh-session-title-live) | 会话标题随对话实时刷新 + 回合边界状态前缀 | **本仓的可读性依赖它**：一张卡跑到哪、有没有收尾，看的是执行会话的标题轴；标题不可信，看板上的进度就只是一句话 |
+| [`dsh-ecosystem-panel`](https://github.com/kira905/dsh-ecosystem-panel) | 只读生态健康面板（六类体检一屏看完） | **本仓是它的典型体检对象**（自研 + `cordis.patch.yml` insert 注册）：「插件到底加载上了没有」这类静默故障由它回答 |
+| [`dsh-diagnostic-tools`](https://github.com/kira905/dsh-diagnostic-tools) | 依赖闭包 / 解耦体检 + 会话图片附件对账 | 升级宿主前后先跑它；本仓的兼容层（`src/settings-compat.ts`）是同一类风险的运行时防线 |
+| [`dsh-butler-archive`](https://github.com/kira905/dsh-butler-archive) | 会话归档管理（列表 / 预览 / 恢复 / 删除 + 可选自动归档） | 本仓派的活会**大量产生会话**；它负责把闲置的搬出 `sessions`，让启动与加载开销不随卡数线性增长 |
+| [`dsh-firstaid`](https://github.com/kira905/dsh-firstaid) | 零依赖急救台：起不来 / 假死 / 要撤销改动 / 数据被删四类现场压成一个入口 | 兜底：看板依赖 Host 常驻，**Host 一卡住，看板就只剩一个转圈的页面**——那时先跑它，再决定动不动手 |
+
+> 组件之间**没有代码依赖**，也不共享运行时 —— 之所以互指，是因为它们回答的是同一类人的同一批问题
+> （长期在自有机器上跑 agent：装得下、找得到、看得见、查得清）。谁装谁不装，互不影响。
 
 ## 许可
 
