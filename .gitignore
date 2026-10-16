@@ -2,3 +2,4 @@ node_modules/
 lib/
 oss-sanitize-report.md
 *.tgz
+package-lock.json

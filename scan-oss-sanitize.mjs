@@ -118,7 +118,12 @@ const ALLOW = [
   {
     id: 'A5',
     why: 'public project reference (already published repositories / document titles)',
-    re: /ops-handoff-design|dsh-archive-sessions|dsh-butler-archive|自治式运维管家|多机交接与云中继|体系全景与家规|Autonomous Operations Steward|Multi-machine Handoff/,
+    re: /ops-handoff-design|dsh-archive-sessions|dsh-butler-archive|自治式运维管家|多机交接与云中继|体系全景与家规|Autonomous Operations Steward|Multi-machine Handoff|dsh-session-toolkit|dsh-session-title-live|dsh-ecosystem-panel|dsh-firstaid|dsh-diagnostic-tools|dsh-task-board-local/,
+  },
+  {
+    id: 'A6',
+    why: 'cross-platform environment variable name (a variable NAME carries no machine-specific value: %VAR% or $env:VAR style)',
+    re: /%APPDATA%|%LOCALAPPDATA%|%USERPROFILE%|%TEMP%|%ProgramFiles%|%ProgramData%|\$env:[A-Za-z_][A-Za-z0-9_]*/i,
   },
 ]
 

@@ -152,6 +152,35 @@ Sibling components in the same ecosystem — separate repositories, separate ver
 
 > There are **no code dependencies** between these components and they share no runtime. They point at each other because they answer the same class of question for the same kind of person (running an agent on your own machine for months: install it, find it, see it, diagnose it). Installing one does not affect the others.
 
+## Host compatibility (measured)
+
+| Host package | Status |
+|---|---|
+| **`0.2.0-rc.2`** | 🔴 **Measured incompatible (2026-10-16): fails to load** |
+
+How it was measured: installed and exercised for real on an **isolated instance** (separate data root +
+port 3090, host `0.2.0-rc.2`) — `npm run build`, copy the artifacts into that instance's profile, restart
+it. The instance's startup log reports:
+
+```
+ui-task-board-local (dsh-task-board-local): failed to import
+```
+
+Root cause (located): **the build output is missing a runtime dependency file**. `lib/index.js` contains
+
+```js
+import { SVC, isTurnEnd } from "../lib/host-adapter.js";
+```
+
+but this repository ships **no source file** for `lib/host-adapter.js` and no script that generates it
+(`lib/` is excluded by `.gitignore`; `npm run build` only emits `index.js` / `invariant.js` / `client.js`).
+⇒ **This version is unusable on `0.2.0-rc.2`**; fixing it requires a later version to ship that runtime
+file (or the step that generates it).
+
+⚠️ **This repository does not widen `peerDependencies` to paper over that result** — declaring a range
+that happens to pass would only hide the fact above. It declares `react` only, and **adds no
+`@deepseek-ai/dsh` peer declaration**.
+
 ## License
 
 **Apache-2.0** — see [`LICENSE`](./LICENSE), which is **byte-identical** to the license file shipped

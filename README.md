@@ -141,6 +141,32 @@ dsh plugin --profile web add dsh-task-board-local@<version>
 > 组件之间**没有代码依赖**，也不共享运行时 —— 之所以互指，是因为它们回答的是同一类人的同一批问题
 > （长期在自有机器上跑 agent：装得下、找得到、看得见、查得清）。谁装谁不装，互不影响。
 
+## 宿主兼容性（实测）
+
+| 宿主主包 | 状态 |
+|---|---|
+| **`0.2.0-rc.2`** | 🔴 **实测不兼容（2026-10-16）：加载失败** |
+
+实测方式：在**隔离实例**（独立数据根 + 端口 3090，宿主主包 `0.2.0-rc.2`）上**真装真跑** ——
+`npm run build` 后把产物装进该实例的 profile 并重启实例，实例启动日志报：
+
+```
+ui-task-board-local (dsh-task-board-local): failed to import
+```
+
+根因（已定位）：**构建产物缺运行时依赖件**。`lib/index.js` 顶层有一行
+
+```js
+import { SVC, isTurnEnd } from "../lib/host-adapter.js";
+```
+
+而本仓**没有** `lib/host-adapter.js` 的源文件，也没有生成它的脚本（`lib/` 被 `.gitignore` 排除，
+`npm run build` 只产出 `index.js` / `invariant.js` / `client.js`）。
+⇒ **本版在 `0.2.0-rc.2` 下不可用**；修复需要后续版本补上该运行时件（或其生成步骤）。
+
+⚠️ **本仓不因这个结论放宽 `peerDependencies`** —— 写一个"通得过"的区间只会掩盖上述事实。
+本仓当前只声明 `react`，**不新增 `@deepseek-ai/dsh` 的 peer 声明**。
+
 ## 许可
 
 **Apache-2.0** —— 见 [`LICENSE`](./LICENSE)（与上游包内许可文件**逐字节相同**）。
