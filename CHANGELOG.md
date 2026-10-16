@@ -3,6 +3,39 @@
 本仓是上游 `@linxin666/dsh-client-ui-task-board` 0.3.4 的 **detached fork**（归属与改动声明见 [`NOTICE`](./NOTICE)）。
 本文件只记**使用者能观察到**的变化（新增 / 修复 / 破坏性变更 / 许可），倒序（最新在最上）。
 
+## [1.1.4] - 2026-10-16
+
+### Fixed
+
+- **新建任务对话框的「模式（Agent 预设）」下拉在 `0.2.0` 下为空 —— 已修**。该处原先只走旧线的
+  `connection.api.agentPresets.list({})`：`0.2.0` 的 `ConnectionHandle` 不再带 `api`，读取抛
+  `TypeError: Cannot read properties of undefined (reading 'agentPresets')`，被调用方的 `catch`
+  吞成一行控制台日志 ⇒ **下拉静默留空**（建卡 / 看板 / 结算都正常，所以这个断点很容易被漏掉）。
+  本版新增 `src/client/preset-roster.ts`：**动态注入** `ctx.inject(['remote.agentPresets'], …)`
+  （0.2.0 现行面，官方 agent-preset 界面读的就是 `ctx.remote.agentPresets.list()`），旧线
+  `connection.api.agentPresets` 作兜底；两种信封（`{ result }` 与裸结果）与两种服务拼写
+  （点号键 / 嵌套访问）都在一个读取器里归一化，调用方不再各自分支。
+  **读不到时不再沉默**：失败按 `(transport, reason)` 去重后报出「哪条传输、为什么」（`no-transport` /
+  `call-threw` / `rpc-failed` / `malformed`），**"读不到"与"确实没有"不再长得一样**。
+- **实测对照（隔离实例 · 端口 3090 · 宿主主包 `0.2.0-rc.2`）**：同一实例、同一动作（看板 → 新建任务），
+  `1.1.3` 的「模式」下拉 DOM = `<select><option value="">部署默认</option></select>`（**仅占位**，
+  控制台报上述 `TypeError`）；`1.1.4` = 占位 + `standard` / `ptc` / `minimal` / `cordis`
+  **四个真实预设**（与宿主 shipped preset 逐名一致，控制台无 `read failed`）。
+
+### Changed
+
+- **如实登记一处残留噪声（不影响功能）**：`apply` 挂载看板时的那次**首帧**读取早于
+  `remote.agentPresets` 命名空间的注入落地，因此**仍会在控制台留下一条**
+  `agent preset roster unavailable: neither connection.api.agentPresets (0.1.1) nor remote.agentPresets
+  (0.1.2+) is present`（同一 `(transport, reason)` 只报一次）；注入回调随后触发重读并**成功填充下拉**。
+  保留该行为是有意的：把 `no-transport` 静默掉，就等于回到"读不到 = 看起来正常"的老毛病。
+- **宿主兼容性（实测）按本次实测改写**：README 中英双份的「宿主兼容性（实测）」节把
+  「Agent 预设下拉为空」从"已知未修"移到"已修"，并补上本条对照读数。
+- **本版不改许可、不改 peer、不放宽 peer 区间**：仍是上游 `Apache-2.0`（fork 不再授权），
+  `peerDependencies` 仍只有 `react`。
+- **本版改动文件**：`src/client/preset-roster.ts`（新增）· `src/client/index.ts`（接入 + 旧读法移除）·
+  `package.json`（版本号）· `CHANGELOG.md` / `README.md` / `README.en.md`（文档）。
+
 ## [1.1.3] - 2026-10-16
 
 ### Fixed

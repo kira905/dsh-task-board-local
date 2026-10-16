@@ -26,6 +26,16 @@ import { mountSidebarEntry } from './sidebar-entry.ts'
 import { TaskBoardSettingsCard, TaskBoardSettingsCardController, type TaskBoardSettings } from './TaskBoardSettingsCard.tsx'
 import { en, zh, type TaskBoardKey } from './locales.ts'
 import { HttpTaskBoardHostTransport } from './host-api.ts'
+import {
+  formatPresetRosterFailure,
+  presetRosterFailureKey,
+  readPresetRoster,
+  readTransportFace,
+  type ConnectionWithApiFace,
+  type PresetRosterTransports,
+  type RemotePresetsFace,
+  type RemoteServiceFace,
+} from './preset-roster.ts'
 import { reportDailyHeartbeat } from './telemetry.ts'
 
 /** Locale namespace this plugin owns. */
@@ -216,6 +226,72 @@ export function apply(ctx: ClientContext): void {
   // nothing mounts yet. Only an unavailable scope (no settings surface served)
   // falls back to the composition default (enabled).
   let uiDisposer: (() => void) | undefined
+
+  // ─── Agent-preset roster transports (0.2.0 migration · 2026-10-16) ─────────
+  //
+  // The defect this ends: the mode picker in the "New task" dialog read
+  // `connection.api.agentPresets`, a shape that only exists on the 0.1.1 line —
+  // its `ConnectionHandle` carries `api`. On 0.2.0 the handle no longer does, the
+  // read threw, the caller's catch turned it into one console line and the
+  // picker simply stayed empty. Nothing else broke, which is why it survived
+  // several releases: a silently empty roster is indistinguishable from a
+  // deployment that has none.
+  //
+  // The same capability now arrives as the `remote` service namespace that the
+  // typed client assembly mounts (`ctx.remote.agentPresets.list()`).
+  //
+  // Why these transports are resolved HERE and not inside mountUi: mountUi also
+  // runs from the settings-scope subscriber, i.e. on that store's fiber, and
+  // Cordis resolves a service against the CALLING fiber — a service this plugin
+  // injects only for itself is refused there (`cannot get property
+  // "remote.agentPresets" without inject`), and an `apply` that throws is
+  // reported as `failed to apply loader entry`, which removes the board
+  // entirely.
+  //
+  // Why readTransportFace: that refusal is thrown from the property read
+  // itself, so a bare read is a boot hazard wherever the face is not injected.
+  // Degrading to "transport absent" keeps the board alive and leaves the
+  // failure visible through the reader's own report.
+  //
+  // The 0.2.0 roster is a DOTTED service name. The official agent-preset surface
+  // injects `['slots', 'locale', 'remote', 'remote.agentPresets',
+  // 'remote.settings']` and reads `ctx.remote.agentPresets.list()`; a plugin
+  // that injects only the bare `remote` is refused at the `.agentPresets` step.
+  // Declaring the dotted name STATICALLY is not an option: on a line where no
+  // preset contribution is mounted (0.1.1 serves `remote` but mounts no
+  // agentPresets namespace) a required-but-absent service parks the loader entry
+  // forever — the board would not load at all, which is worse than an empty
+  // picker. A dynamic injection runs only where the namespace exists and is
+  // simply skipped elsewhere.
+  let remotePresets: RemotePresetsFace | undefined
+  let onRemotePresetsReady: (() => void) | undefined
+  ctx.inject(['remote.agentPresets'], (scoped: unknown) => {
+    // Two spellings of the same service are accepted, because the dotted key and
+    // the nested access are both live (measured: both resolve to the namespace
+    // carrying copy/deletePreset/list/read/select). Either one resolving is
+    // enough; a line that mounts neither stays at `undefined`.
+    const namespaces = scoped as unknown as Record<string, RemotePresetsFace | undefined>
+    const dotted = readTransportFace(() => namespaces['remote.agentPresets'])
+    const nested = readTransportFace(() => (scoped as unknown as { remote?: RemoteServiceFace }).remote?.agentPresets)
+    remotePresets = dotted ?? nested
+    // The namespace arrives asynchronously, possibly before the board mounted;
+    // re-running the read here covers the other order.
+    onRemotePresetsReady?.()
+    return () => {
+      remotePresets = undefined
+    }
+  })
+
+  const presetTransports: PresetRosterTransports = {
+    connectionApi: readTransportFace(() => (ctx.get('connection') as unknown as ConnectionWithApiFace | undefined)?.api?.agentPresets),
+    // A getter, not a snapshot: the namespace may be injected after this object
+    // is built, and a stale `undefined` here would report "no transport" for a
+    // deployment that does serve one.
+    get remote() {
+      return remotePresets
+    },
+  }
+
   const mountUi = (): void => {
     if (uiDisposer !== undefined) return
     // Host and browser SDK declarations share the Cordis Context name. Read
@@ -223,7 +299,9 @@ export function apply(ctx: ClientContext): void {
     // narrow these two client services during a combined package build.
     const sessions = ctx.get('sessions') as unknown as SessionsFace
     const workspaces = ctx.get('workspaces') as unknown as WorkspacesFace
-    const connection = ctx.get('connection') as ConnectionHandle
+    // The connection handle is not read here any more: the roster transports
+    // (including `connection.api.agentPresets` on the old line) are resolved in
+    // apply, on this plugin's own fiber — see the preset-roster block above.
 
     // Core wiring: real runtime faces into the framework-free services.
     const store = new LocalStorageTaskStore()
@@ -265,27 +343,34 @@ export function apply(ctx: ClientContext): void {
     }
     pushWorkspaceOptions()
     disposers.push(workspaces.list.subscribe(pushWorkspaceOptions))
+    // A failed roster read is reported once per (transport, reason): a repeated
+    // failure cannot flood the console, but a NEW one always surfaces. An
+    // unreadable roster used to leave the mode picker empty behind a single
+    // swallowed TypeError — that silence is the defect this report ends.
+    let reportedPresetFailure: string | undefined
+
     const pushPresetOptions = async (): Promise<void> => {
-      try {
-        const response = await connection.api.agentPresets.list({})
-        if (!response.result.ok) return
-        controller.setExecutionOptions({
-          presets: response.result.value.presets.map(preset => ({
-            id: preset.id,
-            name: preset.name,
-            description: preset.description,
-            broken: preset.broken,
-            isDefault: preset.isDefault,
-          })),
-        })
-      } catch (error) {
+      const read = await readPresetRoster(presetTransports)
+      if (!read.ok) {
+        const key = presetRosterFailureKey(read)
+        if (key !== reportedPresetFailure) {
+          reportedPresetFailure = key
+          if (read.error === undefined) console.error(`[dsh-task-board] ${formatPresetRosterFailure(read)}`)
+          else console.error(`[dsh-task-board] ${formatPresetRosterFailure(read)}`, read.error)
+        }
         // A failed roster read leaves the previous options in place; the
         // picker stays usable and the next reconnect retries the read.
-        console.error('[dsh-task-board] agent preset roster read failed', error)
+        return
       }
+      reportedPresetFailure = undefined
+      controller.setExecutionOptions({ presets: read.presets })
     }
     void pushPresetOptions()
     disposers.push(ctx.on('connection/reset', () => { void pushPresetOptions() }))
+    // The roster namespace is injected asynchronously; when it lands after this
+    // mount, read once more so the picker fills without waiting for a reconnect.
+    onRemotePresetsReady = () => { void pushPresetOptions() }
+    disposers.push(() => { onRemotePresetsReady = undefined })
     try {
       disposers.push(mountSidebarEntry(controller))
       disposers.push(mountBoard(controller))

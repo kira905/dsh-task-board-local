@@ -148,9 +148,10 @@ dsh plugin --profile web add dsh-task-board-local@<version>
 |  | **宿主侧插件** | 🟢 **可加载** —— 启动日志无 `failed to import`；看板 API `GET /api/task-board/state` 回 `HTTP 200` |
 |  | **浏览器侧 UI** | 🟢 **可用** —— entry 正常激活（不再 pending），看板六列全部挂载（待规划 / 待办 / 进行中 / 待验收 / 已完成 / 已失败） |
 |  | **设置页** | 🟢 **可用** —— 「设置 → 内置插件」出现「任务看板」页签，卡片正常渲染（文案跟随界面语言） |
+|  | **新建任务的「模式（Agent 预设）」下拉** | 🟢 **可用** —— 列出宿主预设（`standard` / `ptc` / `minimal` / `cordis`）；**`1.1.3` 及更早该处为空**（对照见下） |
 
 实测方式：在**隔离实例**（独立数据根 + 端口 3090，宿主主包 `0.2.0-rc.2`）上**真装真跑** ——
-`npm run build` 后把产物装进该实例的 profile 并重启实例，再用真实浏览器打开该实例并逐项点开。三个阶段的现象分别是：
+`npm run build` 后把产物装进该实例的 profile 并重启实例，再用真实浏览器打开该实例并逐项点开。各版本的现象分别是：
 
 ```
 # 1.1.2（宿主侧启动日志）
@@ -159,10 +160,16 @@ ui-task-board-local (dsh-task-board-local): failed to import
 # 1.1.3 之前的候选中间态（浏览器侧 boot 提示条）
 web boot: 1 entry did not activate dsh-task-board-local: pending (waiting for service: settingsScope)
 
-# 本版（浏览器侧）：无 boot 警告条；看板六列挂载；设置页出现本插件的页签
+# 1.1.3（浏览器侧）：无 boot 警告条；看板六列挂载；设置页出现本插件的页签
+# 但「模式」下拉只有占位：<select><option value="">部署默认</option></select>
+#   控制台：[dsh-task-board] agent preset roster read failed TypeError: Cannot read properties of
+#   undefined (reading 'agentPresets')
+
+# 1.1.4（浏览器侧）：同一动作下「模式」下拉 = 占位 + standard / ptc / minimal / cordis
+#   <select><option value="">部署默认</option><option value="standard">standard（默认）</option>…
 ```
 
-两处断点（**都已在本版修好**）与一处**已知未修**：
+三处断点（**都已修好**）：
 
 1. **宿主侧缺运行时依赖件 —— 已修**。`lib/index.js` 顶层有一行
    `import { SVC, isTurnEnd } from "../lib/host-adapter.js";`，而早先的版本里没有这个文件，
@@ -176,11 +183,23 @@ web boot: 1 entry did not activate dsh-task-board-local: pending (waiting for se
    ⇒ 条目不再依赖任何设置服务即可激活，宿主不提供设置面时降级为「没有设置卡」而不是「整个界面起不来」。
    设置卡的落点也随代迁移：0.2.0 用 `settings.plugins.tab`，旧线仍注册 `web-ui.plugin.item`（两个席位各注册一次，
    `slots.inject` 只在宿主真的声明了该插槽时生效）。
+3. **「模式（Agent 预设）」下拉在 `0.2.0` 下为空 —— 已修**。该处原先只读旧线的
+   `connection.api.agentPresets`：`0.2.0` 的连接柄不再带 `api`，读取抛
+   `TypeError: Cannot read properties of undefined (reading 'agentPresets')`，被 `catch` 吞成一行日志
+   ⇒ **下拉静默留空**（建卡 / 看板 / 结算都正常，所以这处断点特别容易被漏掉）。
+   本版改为**动态注入** `ctx.inject(['remote.agentPresets'], …)`（`0.2.0` 现行面，
+   官方 agent-preset 界面读的就是 `ctx.remote.agentPresets.list()`），旧线 `connection.api.agentPresets`
+   作兜底；两种结果信封与两种服务拼写都在同一个读取器里归一化。**读不到时不再沉默** ——
+   失败按 `(transport, reason)` 去重后报出"哪条传输、为什么"。
 
-**已知未修（如实登记）**：新建任务对话框里的「Agent 预设」下拉在 `0.2.0-rc.2` 下为空 —— 本仓读的是旧线连接面的
-`connection.api.agentPresets`，而该线把预设花名册挂在自己的 remote 命名空间下。读取失败已被捕获并记入控制台
-（`[dsh-task-board] agent preset roster read failed`），**建卡、看板、结算等功能不受影响**（预设留空即按宿主默认）。
-修复它需要把花名册读取改成命名空间注入式探测，属后续版本的工作。
+   **实测对照（同一隔离实例、同一动作）**：`1.1.3` 的「模式」下拉 DOM
+   `<select><option value="">部署默认</option></select>`（**仅占位**）；`1.1.4` 为
+   `<select>…<option value="standard">…` 等 **4 个真实预设**（与宿主 shipped preset 逐名一致）。
+
+   **一处残留噪声（如实登记、不影响功能）**：看板挂载时的**首帧**读取早于 `remote.agentPresets`
+   命名空间注入落地，因此控制台**仍会**留下一条 `agent preset roster unavailable … no-transport`
+   （同一原因只报一次）；注入回调随后重读并**成功填充下拉**。保留它是有意的：把 `no-transport`
+   静默掉，就等于回到"读不到 = 看起来正常"的老毛病。
 
 ⚠️ **本仓不因这个结论放宽 `peerDependencies`** —— 写一个"通得过"的区间只会掩盖上述事实。
 本仓当前只声明 `react`，**不新增 `@deepseek-ai/dsh` 的 peer 声明**。

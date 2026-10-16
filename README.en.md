@@ -159,6 +159,7 @@ Sibling components in the same ecosystem — separate repositories, separate ver
 |  | **Host half** (plugin side) | 🟢 **Loads** — no `failed to import` in the startup log; the board API `GET /api/task-board/state` returns `HTTP 200` |
 |  | **Browser half** (UI) | 🟢 **Usable** — the entry activates (no longer pending) and all six board columns mount (Backlog / To Do / In Progress / Review / Done / Failed) |
 |  | **Settings page** | 🟢 **Usable** — a "Task Board" tab appears under Settings → Built-in plugins, and its card renders (copy follows the UI language) |
+|  | **"Mode" (agent preset) dropdown in New Task** | 🟢 **Usable** — lists the host presets (`standard` / `ptc` / `minimal` / `cordis`); **empty on 1.1.3 and earlier** (comparison below) |
 
 How it was measured: installed and exercised for real on an **isolated instance** (separate data root +
 port 3090, host `0.2.0-rc.2`) — `npm run build`, copy the artifacts into that instance's profile, restart
@@ -171,10 +172,17 @@ ui-task-board-local (dsh-task-board-local): failed to import
 # the intermediate 1.1.3 candidate (browser-side boot notice)
 web boot: 1 entry did not activate dsh-task-board-local: pending (waiting for service: settingsScope)
 
-# this version (browser side): no boot notice; six columns mounted; the plugin's own settings tab appears
+# 1.1.3 (browser side): no boot notice; six columns mounted; the plugin's own settings tab appears
+#   but the "Mode" dropdown holds only the placeholder:
+#   <select><option value="">部署默认</option></select>
+#   console: [dsh-task-board] agent preset roster read failed TypeError: Cannot read properties of
+#   undefined (reading 'agentPresets')
+
+# 1.1.4 (browser side): same action — the "Mode" dropdown = placeholder + standard / ptc / minimal / cordis
+#   <select><option value="">部署默认</option><option value="standard">standard（默认）</option>…
 ```
 
-Two break points — **both fixed in this version** — and one that is **knowingly left open**:
+Three break points — **all fixed**:
 
 1. **The host half was missing a runtime dependency file — fixed.** `lib/index.js` imports
    `import { SVC, isTurnEnd } from "../lib/host-adapter.js";`, and earlier versions shipped neither that file
@@ -192,13 +200,28 @@ Two break points — **both fixed in this version** — and one that is **knowin
    "no GUI". The card's seat follows the same generation split: `settings.plugins.tab` on 0.2.0,
    `web-ui.plugin.item` on the older line — one registration per seat, and `slots.inject` only fires for a
    seat the host actually declares.
+3. **The "Mode" (agent preset) dropdown was empty on `0.2.0` — fixed.** It used to read the older
+   line's `connection.api.agentPresets` only: the `0.2.0` connection handle no longer carries `api`,
+   the read threw `TypeError: Cannot read properties of undefined (reading 'agentPresets')`, and the
+   surrounding `catch` turned that into a single console line ⇒ **the dropdown silently stayed
+   empty** (creating cards, the board itself and settlement all worked, which is exactly why this
+   break point is easy to miss). This version reaches the roster through a **dynamic injection**,
+   `ctx.inject(['remote.agentPresets'], …)` — the `0.2.0` face, and the one the official agent-preset
+   surface itself reads via `ctx.remote.agentPresets.list()` — with the older line's
+   `connection.api.agentPresets` as the fallback; both result envelopes and both service spellings are
+   normalized inside one reader. **An unreadable roster is no longer silent**: failures are reported
+   once per `(transport, reason)`, saying which transport and why.
 
-**Knowingly left open (registered as-is):** the "Agent preset" dropdown in the New Task dialog is empty on
-`0.2.0-rc.2`. This repository reads the older line's `connection.api.agentPresets`, while that line hangs the
-preset roster off its own remote namespace. The failed read is caught and logged to the console
-(`[dsh-task-board] agent preset roster read failed`); **creating cards, the board itself, and settlement are
-unaffected** (an empty preset simply means the host default). Fixing it means probing the namespace through
-an injection, and belongs to a later version.
+   **Measured comparison (same isolated instance, same action):** `1.1.3` renders
+   `<select><option value="">部署默认</option></select>` — **placeholder only**; `1.1.4` renders
+   **four real presets** (`standard` / `ptc` / `minimal` / `cordis`, names identical to the host's
+   shipped presets).
+
+   **One noisy but harmless remnant (registered as-is):** the first roster read during board mount
+   happens before the `remote.agentPresets` namespace is injected, so the console **still** shows one
+   `agent preset roster unavailable … no-transport` line (once per cause); the injection callback then
+   re-reads and **fills the dropdown**. Keeping that behaviour is deliberate — silencing
+   `no-transport` would restore the old "unreadable looks the same as normal" defect.
 
 ⚠️ **This repository does not widen `peerDependencies` to paper over that result** — declaring a range
 that happens to pass would only hide the facts above. It declares `react` only, and **adds no
