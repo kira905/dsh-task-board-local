@@ -93,12 +93,36 @@ const DENY = denyWords()
 /**
  * A hit is allowed only when its line carries an explicit, reviewable reason.
  * Rule ids are quoted in the report so every waiver can be argued with.
+ *
+ * Narrowing notes (added 2026-10-16). Both notes **tighten** the table; neither
+ * introduces a new blanket pass:
+ *
+ * 1. A generic wording (`upstream`, `fork`, `owner`, `来源`, `署名` …) may no
+ *    longer exempt a line on its own. It has to share the line with a real
+ *    public reference: a repository URL, a license term, a published
+ *    identifier (the same list A5 uses) or an explicit authorship field
+ *    (`owner:` / `署名：`). Previously a bare keyword waved through any
+ *    sentence of ordinary prose, a machine name on the same line included.
+ *    Rules A2/A3/A5/A6 are unaffected: they match concrete literals
+ *    (`~/.dsh`, a package name, a published repo name, `%VAR%`), not wording.
+ * 2. A generated artifact's provenance fingerprint line is exempt, but only
+ *    when the **whole** line is that single field (A7). A long hex anywhere
+ *    else is still reported.
  */
+/** Published repositories / document titles — shared by A5 and by the A1c/A4c context. */
+const PUBLISHED_SRC = 'ops-handoff-design|dsh-archive-sessions|dsh-butler-archive|自治式运维管家|多机交接与云中继|体系全景与家规|Autonomous Operations Steward|Multi-machine Handoff|dsh-session-toolkit|dsh-session-title-live|dsh-ecosystem-panel|dsh-firstaid|dsh-diagnostic-tools|dsh-task-board-local'
+/** "Public context" lookahead shared by the conditional rules A1c / A4c. */
+const PUBLIC_CONTEXT = '(?=.*(?:https?://|github\\.com/|gitee\\.com/|git@|(?:' + PUBLISHED_SRC + ')|\\bLICEN[CS]E\\b|Apache-2\\.0|\\bMIT\\b|\\bAGPL\\b|CC BY|许可证|许可|(?:owner|author|maintainer|署名)\\s*[:=：]))'
 const ALLOW = [
   {
     id: 'A1',
-    why: 'upstream attribution / license statement (required by Apache-2.0 §4)',
-    re: /Apache-2\.0|apache license|upstream|Upstream|fork|Fork|derivative|衍生|来源|NOTICE|attribution|Licensed under/i,
+    why: 'license statement wording (the term itself is the compliance wording, required by Apache-2.0 §4)',
+    re: /Apache-2\.0|apache license|Licensed under|SPDX-License-Identifier|\bNOTICE\b/i,
+  },
+  {
+    id: 'A1c',
+    why: 'upstream / derivation wording, only when the same line carries a public reference (URL, license term, published identifier or authorship field) — a bare keyword no longer exempts the line',
+    re: new RegExp(PUBLIC_CONTEXT + '(?:\\b(?:upstream|fork|derivative|attribution)\\b|衍生|来源)', 'i'),
   },
   {
     id: 'A2',
@@ -112,18 +136,28 @@ const ALLOW = [
   },
   {
     id: 'A4',
-    why: 'owner attribution line in an explicit authorship context',
-    re: /copyright|©|署名|author|maintainer|owner/i,
+    why: 'copyright notice wording (the term itself is the compliance wording)',
+    re: /copyright|©|版权/i,
+  },
+  {
+    id: 'A4c',
+    why: 'authorship wording, only when the same line carries a public reference or an explicit authorship field (`owner:` / `author=` / `署名：`) — a bare keyword no longer exempts the line',
+    re: new RegExp(PUBLIC_CONTEXT + '(?:\\b(?:author|maintainer|owner)s?\\b|署名)', 'i'),
   },
   {
     id: 'A5',
     why: 'public project reference (already published repositories / document titles)',
-    re: /ops-handoff-design|dsh-archive-sessions|dsh-butler-archive|自治式运维管家|多机交接与云中继|体系全景与家规|Autonomous Operations Steward|Multi-machine Handoff|dsh-session-toolkit|dsh-session-title-live|dsh-ecosystem-panel|dsh-firstaid|dsh-diagnostic-tools|dsh-task-board-local/,
+    re: new RegExp(PUBLISHED_SRC),
   },
   {
     id: 'A6',
     why: 'cross-platform environment variable name (a variable NAME carries no machine-specific value: %VAR% or $env:VAR style)',
     re: /%APPDATA%|%LOCALAPPDATA%|%USERPROFILE%|%TEMP%|%ProgramFiles%|%ProgramData%|\$env:[A-Za-z_][A-Za-z0-9_]*/i,
+  },
+  {
+    id: 'A7',
+    why: 'generated-artifact provenance fingerprint line (a source digest points at the source it was built from; it carries no machine information) — exempt only when the whole line is that one field',
+    re: /^\W*sourceSha256\s*[:=]\s*[0-9a-f]{64}\W*$/i,
   },
 ]
 

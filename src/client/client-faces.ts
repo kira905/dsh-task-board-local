@@ -98,16 +98,38 @@ export interface SettingsScopeSpec<T> {
 /** Reactive owner handle over one namespace's durable section. */
 export interface SettingsScope<T> extends ObservableSnapshot<SettingsScopeSnapshot<T>> {
   /**
-   * Queue one field write.
+   * Queue one field write. The two generations answer differently (`void` on
+   * the pre-0.2.0 scope, `boolean` acceptance on the 0.2.0 form), so the face
+   * stays open at `unknown` and the form model only awaits settlement — the
+   * bridge scope this plugin binds already reports success its own way.
    * @param field - scalar field inside the namespace section.
    * @param value - JSON-shaped value selected by the user.
    */
-  set(field: string, value: unknown): Promise<void>
+  set(field: string, value: unknown): Promise<unknown>
   /**
    * Queue one field clear, so the field re-inherits the composition layer.
    * @param field - scalar field inside the namespace section.
    */
-  unset(field: string): Promise<void>
+  unset(field: string): Promise<unknown>
+}
+
+/**
+ * The 0.2.0 client settings service (`ctx.configForms`, provided by
+ * `@deepseek-ai/dsh-client-ui-settings`).
+ *
+ * On that line the service no longer hands out a caller-named scope: a form is
+ * keyed by the Host plugin's **profile entry id**, and the values come from the
+ * entry's live config rather than a separately registered section. The snapshot
+ * and write surface is otherwise the same shape this plugin already consumes,
+ * which is why `get()` is modelled as returning {@link SettingsScope}.
+ */
+export interface ConfigFormsFace {
+  /**
+   * The shared form values and write queue for one Host plugin entry.
+   * @param entryId - unique Host plugin (profile entry) id.
+   * @returns the entry's form.
+   */
+  get<T>(entryId: string): SettingsScope<T>
 }
 
 /** One workspace row the board's execution-target picker offers. */

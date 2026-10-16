@@ -1,5 +1,13 @@
 node_modules/
-lib/
+# Build output stays out of the repository — EXCEPT the two host-adapter
+# artifacts, which no build step produces: they are generated from the shared
+# host-adaptation layer and must ship with the package (see README, "Host
+# compatibility"). The directory is opened up with `lib/*` rather than `lib/`
+# because of a Git rule: a negated pattern cannot re-include a file whose
+# PARENT DIRECTORY is excluded.
+lib/*
+!lib/host-adapter.js
+!lib/host-adapter.d.ts
 oss-sanitize-report.md
 *.tgz
 package-lock.json

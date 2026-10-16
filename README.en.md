@@ -154,32 +154,68 @@ Sibling components in the same ecosystem — separate repositories, separate ver
 
 ## Host compatibility (measured)
 
-| Host package | Status |
-|---|---|
-| **`0.2.0-rc.2`** | 🔴 **Measured incompatible (2026-10-16): fails to load** |
+| Host package `0.2.0-rc.2` | Half | Status (measured 2026-10-16) |
+|---|---|---|
+|  | **Host half** (plugin side) | 🟢 **Loads** — no `failed to import` in the startup log; the board API `GET /api/task-board/state` returns `HTTP 200` |
+|  | **Browser half** (UI) | 🟢 **Usable** — the entry activates (no longer pending) and all six board columns mount (Backlog / To Do / In Progress / Review / Done / Failed) |
+|  | **Settings page** | 🟢 **Usable** — a "Task Board" tab appears under Settings → Built-in plugins, and its card renders (copy follows the UI language) |
 
 How it was measured: installed and exercised for real on an **isolated instance** (separate data root +
 port 3090, host `0.2.0-rc.2`) — `npm run build`, copy the artifacts into that instance's profile, restart
-it. The instance's startup log reports:
+it, then open that instance in a real browser and walk the surfaces. The three stages read:
 
 ```
+# 1.1.2 (host-side startup log)
 ui-task-board-local (dsh-task-board-local): failed to import
+
+# the intermediate 1.1.3 candidate (browser-side boot notice)
+web boot: 1 entry did not activate dsh-task-board-local: pending (waiting for service: settingsScope)
+
+# this version (browser side): no boot notice; six columns mounted; the plugin's own settings tab appears
 ```
 
-Root cause (located): **the build output is missing a runtime dependency file**. `lib/index.js` contains
+Two break points — **both fixed in this version** — and one that is **knowingly left open**:
 
-```js
-import { SVC, isTurnEnd } from "../lib/host-adapter.js";
-```
+1. **The host half was missing a runtime dependency file — fixed.** `lib/index.js` imports
+   `import { SVC, isTurnEnd } from "../lib/host-adapter.js";`, and earlier versions shipped neither that file
+   nor the step that generates it (`lib/` is excluded by `.gitignore`; `npm run build` only emits
+   `index.js` / `invariant.js` / `client.js`). This version adds the file and its type declaration: both are
+   generated for this package's target by the shared host-adaptation generator, and **the header carries the
+   `sourceSha256`** of that layer's single source, so the origin can be checked byte for byte.
+2. **The browser half declared a 0.1.x settings service — fixed.** `src/client/index.ts` listed
+   `settingsScope` in its `inject`, while `0.2.0-rc.2` exposes `ctx.configForms` on the browser side (the
+   string `settingsScope` has zero matches inside that host package). **Statically injecting a service that
+   does not exist parks the entry at `pending` forever**, which is why the board UI never came up. This
+   version reaches the settings face through a **dynamic injection**: `ctx.inject(['configForms'], …)` runs
+   only where the service exists, and the pre-0.2.0 line still gets `settingsScope` ⇒ the entry activates
+   without any settings service, and a host that serves none degrades to "no settings card" instead of
+   "no GUI". The card's seat follows the same generation split: `settings.plugins.tab` on 0.2.0,
+   `web-ui.plugin.item` on the older line — one registration per seat, and `slots.inject` only fires for a
+   seat the host actually declares.
 
-but this repository ships **no source file** for `lib/host-adapter.js` and no script that generates it
-(`lib/` is excluded by `.gitignore`; `npm run build` only emits `index.js` / `invariant.js` / `client.js`).
-⇒ **This version is unusable on `0.2.0-rc.2`**; fixing it requires a later version to ship that runtime
-file (or the step that generates it).
+**Knowingly left open (registered as-is):** the "Agent preset" dropdown in the New Task dialog is empty on
+`0.2.0-rc.2`. This repository reads the older line's `connection.api.agentPresets`, while that line hangs the
+preset roster off its own remote namespace. The failed read is caught and logged to the console
+(`[dsh-task-board] agent preset roster read failed`); **creating cards, the board itself, and settlement are
+unaffected** (an empty preset simply means the host default). Fixing it means probing the namespace through
+an injection, and belongs to a later version.
 
 ⚠️ **This repository does not widen `peerDependencies` to paper over that result** — declaring a range
-that happens to pass would only hide the fact above. It declares `react` only, and **adds no
+that happens to pass would only hide the facts above. It declares `react` only, and **adds no
 `@deepseek-ai/dsh` peer declaration**.
+
+## Published copy vs. the production tree
+
+This repository is the **generalized public distribution**: it **differs** from the internal tree the author
+maintains (internal dependencies and internal naming have been stripped). Concretely, `lib/host-adapter.js`
+(the host-side shared adapter's companion artifact) is generated for this package's target, and its **header
+keeps the provenance fingerprint** (`sourceSha256`, pointing at the single source it was generated from, which
+can be checked byte for byte), while the **body's internal wording and internal component names have been
+neutralized** (the internal names for "user / assistant / maintenance component" are replaced with neutral
+terms; internal planning-document paths and the developer machine's code name are removed).
+⇒ **This copy is deliberately no longer byte-identical to the internal single source — that is intended, not a
+defect**; provenance is still verifiable through the header fingerprint. Other artifacts produced by the same
+generator are unaffected.
 
 ## License
 

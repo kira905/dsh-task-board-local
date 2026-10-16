@@ -143,29 +143,56 @@ dsh plugin --profile web add dsh-task-board-local@<version>
 
 ## 宿主兼容性（实测）
 
-| 宿主主包 | 状态 |
-|---|---|
-| **`0.2.0-rc.2`** | 🔴 **实测不兼容（2026-10-16）：加载失败** |
+| 宿主主包 `0.2.0-rc.2` | 面向 | 状态（2026-10-16 实测） |
+|---|---|---|
+|  | **宿主侧插件** | 🟢 **可加载** —— 启动日志无 `failed to import`；看板 API `GET /api/task-board/state` 回 `HTTP 200` |
+|  | **浏览器侧 UI** | 🟢 **可用** —— entry 正常激活（不再 pending），看板六列全部挂载（待规划 / 待办 / 进行中 / 待验收 / 已完成 / 已失败） |
+|  | **设置页** | 🟢 **可用** —— 「设置 → 内置插件」出现「任务看板」页签，卡片正常渲染（文案跟随界面语言） |
 
 实测方式：在**隔离实例**（独立数据根 + 端口 3090，宿主主包 `0.2.0-rc.2`）上**真装真跑** ——
-`npm run build` 后把产物装进该实例的 profile 并重启实例，实例启动日志报：
+`npm run build` 后把产物装进该实例的 profile 并重启实例，再用真实浏览器打开该实例并逐项点开。三个阶段的现象分别是：
 
 ```
+# 1.1.2（宿主侧启动日志）
 ui-task-board-local (dsh-task-board-local): failed to import
+
+# 1.1.3 之前的候选中间态（浏览器侧 boot 提示条）
+web boot: 1 entry did not activate dsh-task-board-local: pending (waiting for service: settingsScope)
+
+# 本版（浏览器侧）：无 boot 警告条；看板六列挂载；设置页出现本插件的页签
 ```
 
-根因（已定位）：**构建产物缺运行时依赖件**。`lib/index.js` 顶层有一行
+两处断点（**都已在本版修好**）与一处**已知未修**：
 
-```js
-import { SVC, isTurnEnd } from "../lib/host-adapter.js";
-```
+1. **宿主侧缺运行时依赖件 —— 已修**。`lib/index.js` 顶层有一行
+   `import { SVC, isTurnEnd } from "../lib/host-adapter.js";`，而早先的版本里没有这个文件，
+   也没有生成它的步骤（`lib/` 被 `.gitignore` 排除，`npm run build` 只产出 `index.js` / `invariant.js` / `client.js`）。
+   本版补上该件与它的类型声明：由宿主侧共享适配层的生成器按 target 生成，**文件头带 `sourceSha256`**，
+   可与该层唯一源逐字节核对来源。
+2. **浏览器侧按旧线（0.1.x）的设置服务声明加载 —— 已修**。`src/client/index.ts` 的 `inject` 里原先写着
+   `settingsScope`，而 `0.2.0-rc.2` 的浏览器侧设置面是 `ctx.configForms`（该主包内 `settingsScope` 字符串零命中）；
+   **静态 inject 一个不存在的服务会把 entry 永久挂在 `pending`**，看板界面因此起不来。
+   本版把设置面改成**动态注入**：`ctx.inject(['configForms'], …)` 只在服务存在时执行，旧线仍走 `settingsScope`
+   ⇒ 条目不再依赖任何设置服务即可激活，宿主不提供设置面时降级为「没有设置卡」而不是「整个界面起不来」。
+   设置卡的落点也随代迁移：0.2.0 用 `settings.plugins.tab`，旧线仍注册 `web-ui.plugin.item`（两个席位各注册一次，
+   `slots.inject` 只在宿主真的声明了该插槽时生效）。
 
-而本仓**没有** `lib/host-adapter.js` 的源文件，也没有生成它的脚本（`lib/` 被 `.gitignore` 排除，
-`npm run build` 只产出 `index.js` / `invariant.js` / `client.js`）。
-⇒ **本版在 `0.2.0-rc.2` 下不可用**；修复需要后续版本补上该运行时件（或其生成步骤）。
+**已知未修（如实登记）**：新建任务对话框里的「Agent 预设」下拉在 `0.2.0-rc.2` 下为空 —— 本仓读的是旧线连接面的
+`connection.api.agentPresets`，而该线把预设花名册挂在自己的 remote 命名空间下。读取失败已被捕获并记入控制台
+（`[dsh-task-board] agent preset roster read failed`），**建卡、看板、结算等功能不受影响**（预设留空即按宿主默认）。
+修复它需要把花名册读取改成命名空间注入式探测，属后续版本的工作。
 
 ⚠️ **本仓不因这个结论放宽 `peerDependencies`** —— 写一个"通得过"的区间只会掩盖上述事实。
 本仓当前只声明 `react`，**不新增 `@deepseek-ai/dsh` 的 peer 声明**。
+
+## 发布副本 vs 生产树
+
+本仓是**对外的通用化发布版**：它与作者本机维护的内部版本**存在差异**（已剥离内部依赖与内部命名）。
+具体地，`lib/host-adapter.js`（宿主侧共享适配层的补件）由该层的生成器按本包 target 产出，**文件头保留来源指纹**
+（`sourceSha256`，指向生成它的唯一源，可与唯一源现跑值逐字节核对），但**正文里的内部称呼与内部件名已被中性化**
+（内部对"用户 / 助手 / 维护组件"的叫法换成通用词，内部方案档路径与开发机代号已删除）。
+⇒ **这一份副本与内部唯一源不再逐字节一致 —— 这是有意为之，不是缺陷**；来源仍可用头部指纹核对。
+生成器产出的其它副本不受影响。
 
 ## 许可
 
