@@ -18,8 +18,17 @@ import { dirname, isAbsolute, relative, resolve as resolvePath, sep } from 'node
 import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
-/** Plugin id stamped into the __ModuleLoader__.load handoff and style tags. */
-const ID = 'dsh-task-board-local'
+/**
+ * Plugin id stamped into the __ModuleLoader__.load handoff and style tags.
+ *
+ * 🔴 This MUST equal the published package name: the 0.2.0 host's
+ * `dsh-client-modules` looks the registered factory up by **entry id = package
+ * name** (`graphRow(id /* package name *\/)`), so an unscoped id would serve
+ * HTTP 200 and still fail with `loaded without registering … via
+ * __ModuleLoader__.load` — the plugin then never mounts (measured in the S16
+ * isolated install). Keep it in sync with `package.json#name`.
+ */
+const ID = '@kira905/dsh-task-board-local'
 
 /** Virtual-id wrapper keeping module CSS away from tsdown's own css pipeline. */
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'

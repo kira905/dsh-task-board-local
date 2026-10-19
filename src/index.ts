@@ -26,7 +26,8 @@ import { installSettingsCompat } from './settings-compat.ts'
 // 宿主适配层（唯一源 + 生成副本，P1 收敛 2026-09-15）：
 // 服务名/事件名一律走它（R4）。⚠️ 该 import 在 tsdown 里被 `external` 保留为运行时依赖 ——
 // 若被 inline 进 lib/index.js，产物里就重新出现裸字面量、且副本不再可校验。
-import { SVC } from '../lib/host-adapter.js'
+import { SVC, service } from '../lib/host-adapter.js'
+import { asNewLineSessionApi, type ResolveNewLineSessionApi } from './host-runner.ts'
 
 /** Order of the announcement section within the tool-guidance band. */
 const SECTION_ORDER = 200
@@ -71,6 +72,37 @@ export function resolveApiProxy(ctx: Context): () => import('@deepseek-ai/dsh-ho
       return (api ?? null) as import('@deepseek-ai/dsh-host-apiproxy').ApiProxy | null
     } catch {
       // cordis throws on undeclared service properties; never let probing break boot.
+      return null
+    }
+  }
+}
+
+/**
+ * Build a **late-binding** accessor for the 0.1.5-line session service
+ * (`sessionController`, `@deepseek-ai/dsh-api-session-controller`).
+ *
+ * The legacy `apiProxy` domain was split into per-domain services on the
+ * 0.1.5 line, and the session domain is `sessionController` — the same service
+ * the Host's own web client drives. This plugin executes board sessions
+ * through it (`create` → `rename` → `prompt`) and reads its session index
+ * (`list`) and logs (`inspect` / `page`).
+ *
+ * Deliberately **not** in `inject`: exactly like `apiProxy`, this service does
+ * not exist on the other host line, and a static declaration of an absent
+ * service leaves the entry permanently `pending` (= `1 entry did not
+ * activate`, i.e. boot failure). Both lines are therefore resolved at call
+ * time, and only the intersection of their service sets is declared statically.
+ *
+ * The returned accessor re-resolves on every call: at `apply` time neither
+ * line is guaranteed to have registered the service yet, so probing once here
+ * would bake a wrong answer into the runner for the whole process lifetime.
+ */
+export function resolveSessionController(ctx: Context): ResolveNewLineSessionApi {
+  return () => {
+    try {
+      return asNewLineSessionApi(service(ctx as never, SVC.sessionController))
+    } catch {
+      // cordis throws on undeclared service properties; probing must never break boot.
       return null
     }
   }
@@ -153,6 +185,7 @@ function applyImpl(ctx: Context, config?: Config): void {
         return (await ctx.commands.execute(agent, line, [], signal))?.result
       },
     },
+    newSessionResolver: resolveSessionController(ctx),
   })
   host.setConfiguration(config?.enabled ?? true, config?.preventIdleSleep ?? false)
   host.start()

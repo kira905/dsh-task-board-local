@@ -3,6 +3,30 @@
 本仓是上游 `@linxin666/dsh-client-ui-task-board` 0.3.4 的 **detached fork**（归属与改动声明见 [`NOTICE`](./NOTICE)）。
 本文件只记**使用者能观察到**的变化（新增 / 修复 / 破坏性变更 / 许可），倒序（最新在最上）。
 
+## [1.1.5] - 2026-10-19
+
+### Fixed
+
+- 🔴 **浏览器端插件在 DSH 0.2.0 主包上「加载了但没注册」—— 已修**。`lib/client.js` 的
+  `__ModuleLoader__.load({ id })` 里写的是旧的无 scope 名 `dsh-task-board-local`，而 0.2.0 的
+  `dsh-client-modules` 按**条目 id = 包名**（`@kira905/dsh-task-board-local`）找 factory ⇒
+  资源 HTTP 200、控制台却报
+  `loaded without registering "@kira905/dsh-task-board-local" via __ModuleLoader__.load`，
+  侧边栏「任务看板」不出现。本版把**构建配置里的 id**（`tsdown.config.ts` 的 `ID`）改成包名后
+  重出产物；`data-plugin` / `data-plugin-css` 随之对齐（样式归属走同一个 id）。
+  影响面：**只影响浏览器端是否挂载**，host 半（账本 / 路由 / 定时）此前一直正常。
+- 🔴 **执行卡点「执行」直接 `failed`（`ApiProxyUnavailableError`）—— 已修**。旧版执行链只走
+  旧线的 `apiProxy` 服务，而 0.2.0-rc.2 不提供该服务 ⇒ `run`/`rerun` 抛
+  「board session execution (run/rerun) is disabled」。本版移植双路执行链：
+  **0.1.5+ 线优先**走 `sessionController`（`create` → `rename` → [`/permission`] → `prompt`），
+  旧线 `apiProxy` 兜底，两条线都没有才显式报错。执行结论的读法同样三级回退
+  （`inspect` → `page` → HTTP `session.history`），判活列表优先用 `sessionController.list`；
+  两条线的结论判据共用同一套（首个 `turn/end` + 30s 启动宽限），不会各自漂移。
+
+### Changed
+
+- 无破坏性变更；`peerDependencies` / `engines` 区间不变。
+
 ## [1.1.4] - 2026-10-16
 
 ### Fixed

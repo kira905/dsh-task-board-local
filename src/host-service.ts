@@ -1,7 +1,7 @@
 import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import { nextRunAtMs } from './core/schedule.ts'
 import { HostTaskLedger, type OpenedRun, type OpenExecutionReference } from './host-ledger.ts'
-import { HostExecutionRunner, SESSION_START_GRACE_MS, SessionLaunchError, isExecutionAlive, isStalePendingSettlement, type SessionCommandDispatcher } from './host-runner.ts'
+import { HostExecutionRunner, SESSION_START_GRACE_MS, SessionLaunchError, isExecutionAlive, isStalePendingSettlement, type ResolveNewLineSessionApi, type SessionCommandDispatcher } from './host-runner.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
 import type { TaskBoardAction, TaskBoardEventPayload, TaskBoardSnapshot } from './protocol.ts'
 
@@ -29,9 +29,15 @@ export class TaskBoardHostService {
     power?: PowerInhibitor
     now?: () => number
     commandDispatcher?: SessionCommandDispatcher
+    /**
+     * Late-binding accessor for the 0.1.5-line session service
+     * (`sessionController`). Absent ⇒ the runner uses the legacy `apiProxy`
+     * path only, i.e. the pre-port behaviour on the 0.1.1 line.
+     */
+    newSessionResolver?: ResolveNewLineSessionApi
   } = {}) {
     this.ledger = options.ledger ?? new HostTaskLedger()
-    this.runner = new HostExecutionRunner(getApi, options.commandDispatcher)
+    this.runner = new HostExecutionRunner(getApi, options.commandDispatcher, options.newSessionResolver)
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
     this.ledger.subscribe(() => {
