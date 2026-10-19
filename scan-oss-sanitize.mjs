@@ -108,11 +108,25 @@ const DENY = denyWords()
  * 2. A generated artifact's provenance fingerprint line is exempt, but only
  *    when the **whole** line is that single field (A7). A long hex anywhere
  *    else is still reported.
+ * 3. A5 keeps its literal list but no longer exempts a whole line (2026-10-16).
+ *    It excuses a hit only when **every** occurrence of that hit pattern on the
+ *    line falls inside a public reference — an already-published repository /
+ *    document title, or a public URL / `git@host:path` remote. A published repo
+ *    name therefore still excuses that name itself (and the account name at the
+ *    start of a repository URL), while anything else sharing the line — a
+ *    machine name, a drive letter, a credential shape, a private address —
+ *    turns that line into "needs review".
  */
 /** Published repositories / document titles — shared by A5 and by the A1c/A4c context. */
 const PUBLISHED_SRC = 'ops-handoff-design|dsh-archive-sessions|dsh-butler-archive|自治式运维管家|多机交接与云中继|体系全景与家规|Autonomous Operations Steward|Multi-machine Handoff|dsh-session-toolkit|dsh-session-title-live|dsh-ecosystem-panel|dsh-firstaid|dsh-diagnostic-tools|dsh-task-board-local'
 /** "Public context" lookahead shared by the conditional rules A1c / A4c. */
 const PUBLIC_CONTEXT = '(?=.*(?:https?://|github\\.com/|gitee\\.com/|git@|(?:' + PUBLISHED_SRC + ')|\\bLICEN[CS]E\\b|Apache-2\\.0|\\bMIT\\b|\\bAGPL\\b|CC BY|许可证|许可|(?:owner|author|maintainer|署名)\\s*[:=：]))'
+/**
+ * Public reference spans used by the narrowed A5 (see note 3): a public URL
+ * (http/https) or an SCP-style git remote (`git@host:path`). Together with
+ * PUBLISHED_SRC these say where a hit may be excused.
+ */
+const PUBLIC_REF = /https?:\/\/[^\s<>"'`)\]}]+|git@[^\s<>"'`)\]}]+/g
 const ALLOW = [
   {
     id: 'A1',
@@ -146,7 +160,7 @@ const ALLOW = [
   },
   {
     id: 'A5',
-    why: 'public project reference (already published repositories / document titles)',
+    why: 'public project reference (already published repositories / document titles) — narrowed 2026-10-16: a hit is excused only when the hit itself sits inside such a reference (a published identifier, or a public URL / git remote that carries it); A5 never exempts the whole line',
     re: new RegExp(PUBLISHED_SRC),
   },
   {
@@ -214,9 +228,47 @@ function mask(text) {
   return text.length > 12 ? head + '…' : head
 }
 
-function allowedBy(line) {
+/**
+ * Narrowed A5 (note 3): A5 no longer exempts a whole line. It excuses a hit only
+ * when **every** occurrence of that hit pattern on the line is excused — i.e.
+ * sits inside a published identifier (PUBLISHED_SRC) or a public URL / git
+ * remote (PUBLIC_REF). Checking every occurrence, not just the recorded first
+ * one, is what keeps `dsh-butler-archive on <host>` from slipping through: there
+ * the first deny-word match is the repo name itself and would pass on its own.
+ */
+function publicRefSpans(line) {
+  const spans = []
+  for (const re of [new RegExp(PUBLISHED_SRC, 'g'), new RegExp(PUBLIC_REF.source, 'g')]) {
+    for (const m of line.matchAll(re)) spans.push({ start: m.index, end: m.index + m[0].length })
+  }
+  return spans
+}
+
+/** Excused = the hit itself sits inside a public reference span. */
+function excusedHit(spans, m) {
+  const text = m[0]
+  if (text === '') return false
+  for (const s of spans) if (m.index >= s.start && m.index + text.length <= s.end) return true
+  return false
+}
+
+/** A5 applies only when every occurrence of this hit pattern on the line is excused. */
+function a5Covered(probe, pattern, match) {
+  const spans = publicRefSpans(probe)
+  if (!excusedHit(spans, match)) return false
+  const flags = pattern.re.flags.includes('g') ? pattern.re.flags : pattern.re.flags + 'g'
+  for (const m of probe.matchAll(new RegExp(pattern.re.source, flags))) {
+    if (!excusedHit(spans, m)) return false
+  }
+  return true
+}
+
+function allowedBy(line, probe, pattern, match) {
   for (const rule of ALLOW) {
-    if (rule.re.test(line)) return rule
+    if (!rule.re.test(line)) continue
+    // A5 is the only rule that no longer exempts the whole line (note 3).
+    if (rule.id === 'A5' && !a5Covered(probe, pattern, match)) continue
+    return rule
   }
   return null
 }
@@ -244,7 +296,7 @@ function scan() {
         p.re.lastIndex = 0
         const m = p.re.exec(probe)
         if (m === null) continue
-        const allow = allowedBy(line)
+        const allow = allowedBy(line, probe, p, m)
         hits.push({
           file: rel,
           line: i + 1,
