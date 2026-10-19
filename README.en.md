@@ -76,9 +76,15 @@ This fork started from upstream **0.3.4** and **no longer follows upstream relea
 
 ## Install
 
-This repository is **not on npm** at the moment. Two routes:
+The package is published on npm as `@kira905/dsh-task-board-local`. Two routes:
 
-**A. Build from source and mount locally** (the route that works today)
+**A. Install from npm** (recommended)
+
+```bash
+dsh plugin --profile web add @kira905/dsh-task-board-local@<version>
+```
+
+**B. Build from source and mount locally** (when you want to edit the source)
 
 ```bash
 git clone <this-repo> dsh-task-board-local
@@ -88,15 +94,9 @@ npm run build          # emits lib/index.js (host half) and lib/client.js (brows
 ```
 
 Then place the directory inside the target profile's `node_modules`
-(`$DSH_HOME/profiles/web/node_modules/dsh-task-board-local`), insert the plugin into the profile's
+(`$DSH_HOME/profiles/web/node_modules/@kira905/dsh-task-board-local`), insert the plugin into the profile's
 bundle layer as shown in this repository's `cordis.patch.yml`, and restart `dsh web`
 (or simply reload the page — the browser half is served per request).
-
-**B. Once it is published to npm**
-
-```bash
-dsh plugin --profile web add dsh-task-board-local@<version>
-```
 
 **Supported host range**: `dsh >= 0.1.1-rc.1` (same declaration as upstream). Day-to-day this fork
 runs on **0.1.1-rc.2**; the code probes at runtime for the newer lines (split packages, the new

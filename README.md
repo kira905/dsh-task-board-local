@@ -75,9 +75,15 @@
 
 ## 安装
 
-本仓当前**不在 npm 上**，两种方式：
+包已发布到 npm（`@kira905/dsh-task-board-local`），两种方式：
 
-**A. 从源码构建后本地挂载**（推荐，当前可用）
+**A. 从 npm 装**（推荐）
+
+```bash
+dsh plugin --profile web add @kira905/dsh-task-board-local@<version>
+```
+
+**B. 从源码构建后本地挂载**（要改源码时）
 
 ```bash
 git clone https://github.com/kira905/dsh-task-board-local dsh-task-board-local
@@ -88,13 +94,7 @@ npm install
 npm run build          # 产出 lib/index.js 与 lib/client.js
 ```
 
-然后把这个目录放进目标 profile 的 `node_modules`（`$DSH_HOME/profiles/web/node_modules/dsh-task-board-local`），并按本仓 `cordis.patch.yml` 的写法在 profile 的 bundle 层里 insert 该插件；重启 `dsh web`（或只重载页面，浏览器半边是每请求读盘的）。
-
-**B. 若将来发布到 npm**
-
-```bash
-dsh plugin --profile web add dsh-task-board-local@<version>
-```
+然后把这个目录放进目标 profile 的 `node_modules`（`$DSH_HOME/profiles/web/node_modules/@kira905/dsh-task-board-local`），并按本仓 `cordis.patch.yml` 的写法在 profile 的 bundle 层里 insert 该插件；重启 `dsh web`（或只重载页面，浏览器半边是每请求读盘的）。
 
 **宿主版本兼容区间**：`dsh >= 0.1.1-rc.1`（与上游声明一致）。本仓的日常运行线是 **0.1.1-rc.2**；对更高版本线（服务拆包、设置服务新签名）代码里做了**运行时探测**，但**未在新线上实测** —— 换线前请先在自己的环境里跑一遍建卡/执行/验收。
 

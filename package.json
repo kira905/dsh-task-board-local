@@ -1,5 +1,5 @@
 {
-  "name": "dsh-task-board-local",
+  "name": "@kira905/dsh-task-board-local",
   "description": "Self-maintained DSH Web task board (forked from @linxin666/dsh-client-ui-task-board 0.3.4, detached from upstream): human acceptance gate, card kinds (once/recurring/interactive), and editable notes on executed cards.",
   "version": "1.1.4",
   "type": "module",
@@ -57,12 +57,32 @@
     "lib/**/*.d.ts",
     "lib/**/*.d.ts.map",
     "src",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "NOTICE",
+    "CHANGELOG.md"
   ],
   "license": "Apache-2.0",
   "scripts": {
     "build": "tsdown",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit"
-  }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kira905/dsh-task-board-local.git"
+  },
+  "homepage": "https://github.com/kira905/dsh-task-board-local#readme",
+  "bugs": {
+    "url": "https://github.com/kira905/dsh-task-board-local/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "task-board",
+    "dsh-client"
+  ]
 }
