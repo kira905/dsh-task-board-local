@@ -50,7 +50,7 @@ const SKIP_DIRS = new Set(['node_modules', '.git', '.dsh', '_archive', 'dist', '
 const TEXT_EXT = new Set([
   '.ts', '.tsx', '.js', '.mjs', '.cjs', '.mts', '.cts', '.jsx',
   '.json', '.md', '.markdown', '.css', '.yml', '.yaml', '.txt',
-  '.html', '.map', '.sh', '.ps1', '.cmd', '.bat', '.toml',
+  '.html', '.map', '.sh', '.ps1', '.cmd', '.bat', '.toml', '.py',
 ])
 /**
  * Extension-less text files that must not be skipped — the compliance files
