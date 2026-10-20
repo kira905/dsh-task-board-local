@@ -170,8 +170,11 @@ const ALLOW = [
   },
   {
     id: 'A7',
-    why: 'generated-artifact provenance fingerprint line (a source digest points at the source it was built from; it carries no machine information) — exempt only when the whole line is that one field',
-    re: /^\W*sourceSha256\s*[:=]\s*[0-9a-f]{64}\W*$/i,
+    // 2026-10-20：从「整行只有一个 sourceSha256 字段」放宽到「内容摘要字段/常量形态」。
+    // 触发条件由 `a7DigestHit()` 在 allowedBy 里逐条判（**只对 P3 长 hash 生效**，且整行不得含
+    // 盘符/用户目录/环境变量/@/协议/反斜杠）⇒ 同行夹带的机器名（P0）、路径（P2）仍会被各自规则拦。
+    why: 'content digest field (a 64-hex sha256 that points at the source it was built from; carries no machine information) — exempt only for P3 hits, only when the rest of the line holds nothing machine-like (no drive path / user dir / env var / @ / URL / backslash)',
+    re: /\b[0-9a-f]{64}\b/i,
   },
 ]
 
@@ -263,11 +266,42 @@ function a5Covered(probe, pattern, match) {
   return true
 }
 
+/**
+ * A7（2026-10-20 放宽）：内容摘要豁免。
+ * 为什么放宽：fork 溯源记录（`FORK-BASE.json` 的 sha256/dtsSha256/patchSha256）与回滚脚本里的
+ * 改动前后摘要（`const BEFORE = { sha: '<64hex>', bytes, label }` / 注释里的 `BEFORE: <64hex>`）
+ * 都是**公开上游文件的内容指纹**，不含任何机器信息，但旧 A7 只认"整行就一个 sourceSha256 字段"，
+ * 于是这些行被判待复核 ⇒ 整包发不出去。
+ *
+ * 放宽的边界（**只对 P3 长 hash 命中生效**，这一点是关键）：
+ *   ① 命中本身必须是 64 位 hex；
+ *   ② 整行不得含：盘符路径 / 用户目录 / %VAR% 或 $env: / `@` / `://` / 反斜杠；
+ *   ③ 去掉 64-hex 后剩下的字符只能是"字段名 + 标点 + 数字 + 中文标签"这一小撮。
+ * ⇒ 同一行里若夹带真机名（P0）、session id 或 uuid（P3 另一次命中）、私网地址（P5），
+ *   那些命中**各自照旧判待复核**，不会被 A7 顺带放行。
+ */
+function a7DigestHit(probe, pattern, match) {
+  if (pattern.id !== 'P3') return false
+  if (!/^[0-9a-f]{64}$/i.test(match[0])) return false
+  // 同一行还有"另一个 P3 形状的机器 id"（session id / uuid）⇒ 不放行：P3 每行只记第一处命中，
+  // 若把整行放掉，后面那处 session id 就再也不会被报出来。
+  if (/session-[0-9a-f]{6,}|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/i.test(probe)) return false
+  if (/[A-Za-z]:[\\/]|Users[\\/]|\$env:|%[A-Za-z_]+%|@|:\/\/|\\/.test(probe)) return false
+  // 注释起止符（/* 、*/、行首 //）不算"斜杠用途"，先抹掉再做字符面判定；其它斜杠（路径 / URL）一律拒。
+  const rest = probe
+    .replace(/^\s*\/{2,}\s*/, ' ')
+    .replace(/\/\*+|\*+\//g, ' ')
+    .replace(/\b[0-9a-f]{64}\b/gi, '\u27e8digest\u27e9')
+  return /^[\s\w"'`:,.{}\[\]()=+*|#<>\u27e8\u27e9\-\u2014\u2013\u3001\u3002\uff08\uff09\uff0c\uff1a\uff1b\uff01\uff1f\u4e00-\u9fff]*$/u.test(rest)
+}
+
 function allowedBy(line, probe, pattern, match) {
   for (const rule of ALLOW) {
     if (!rule.re.test(line)) continue
-    // A5 is the only rule that no longer exempts the whole line (note 3).
+    // A5 是唯一"不再整行放行"的规则（note 3）。
     if (rule.id === 'A5' && !a5Covered(probe, pattern, match)) continue
+    // A7 有额外守卫：只对 P3 内容摘要命中生效（见 a7DigestHit）。
+    if (rule.id === 'A7' && !a7DigestHit(probe, pattern, match)) continue
     return rule
   }
   return null
