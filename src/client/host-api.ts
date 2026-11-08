@@ -3,6 +3,9 @@ import {
   TASK_BOARD_API_PREFIX,
   type TaskBoardAction,
   type TaskBoardActionEnvelope,
+  type TaskBoardArchiveCardsPage,
+  type TaskBoardArchiveIndexPage,
+  type TaskBoardArchivePageQuery,
   type TaskBoardEventPayload,
   type TaskBoardSnapshot,
 } from '../protocol.ts'
@@ -11,6 +14,19 @@ const IMPORT_MARKER = 'dsh.taskBoard.v2.hostImported'
 const SOURCE_KEY = 'dsh.taskBoard.v2.sourceId'
 const IMPORT_REQUEST_KEY = 'dsh.taskBoard.v2.importRequestId'
 const REQUEST_TIMEOUT_MS = 15_000
+
+/**
+ * Board scope this client reads at (方案 §3 D-10 / K2 §8 #4).
+ *
+ * The archive view no longer piggybacks on the full `/state` payload: it reads
+ * `GET /archive` and pages through the batches, so every regular read here can
+ * ask for in-flight cards only. That keeps a mutation response at in-flight
+ * size instead of re-sending the whole archive (判据 J14) and keeps the
+ * browser's poll cheap. Readers that genuinely need the merged view (butler
+ * tools, duplicate checks) simply send no header and still get `all`.
+ */
+const BOARD_SCOPE_HEADER = 'x-dsh-board-scope'
+const LIVE_SCOPE = 'live'
 
 function uuid(): string {
   return globalThis.crypto?.randomUUID?.() ?? `browser-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
@@ -22,10 +38,23 @@ async function readJson<T>(response: Response): Promise<T> {
   return body
 }
 
+/** `?limit&offset`, omitting values the caller left out. */
+function pagingQuery(page: TaskBoardArchivePageQuery): string {
+  const params = new URLSearchParams()
+  if (page.limit !== undefined) params.set('limit', String(page.limit))
+  if (page.offset !== undefined) params.set('offset', String(page.offset))
+  const query = params.toString()
+  return query === '' ? '' : `?${query}`
+}
+
 export interface TaskBoardHostTransport {
   bootstrap(legacy: readonly TaskRecord[]): Promise<TaskBoardSnapshot>
   state(): Promise<TaskBoardSnapshot>
   action(action: TaskBoardAction): Promise<TaskBoardSnapshot>
+  /** Batch list of the archive (方案 §3 D-4). */
+  archiveBatches(page?: TaskBoardArchivePageQuery): Promise<TaskBoardArchiveIndexPage>
+  /** One page of one batch's cards (方案 §3 D-4). */
+  archiveCards(batchId: string, page?: TaskBoardArchivePageQuery): Promise<TaskBoardArchiveCardsPage>
   subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void
 }
 
@@ -61,6 +90,17 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
     return await this.post(uuid(), action)
   }
 
+  async archiveBatches(page: TaskBoardArchivePageQuery = {}): Promise<TaskBoardArchiveIndexPage> {
+    return await this.request(`${TASK_BOARD_API_PREFIX}/archive${pagingQuery(page)}`, { cache: 'no-store' })
+  }
+
+  async archiveCards(batchId: string, page: TaskBoardArchivePageQuery = {}): Promise<TaskBoardArchiveCardsPage> {
+    return await this.request(
+      `${TASK_BOARD_API_PREFIX}/archive/${encodeURIComponent(batchId)}${pagingQuery(page)}`,
+      { cache: 'no-store' },
+    )
+  }
+
   private async post(requestId: string, action: TaskBoardAction): Promise<TaskBoardSnapshot> {
     const envelope: TaskBoardActionEnvelope = { requestId, action }
     return await this.request(`${TASK_BOARD_API_PREFIX}/action`, {
@@ -70,11 +110,15 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
     })
   }
 
-  private async request(url: string, init: RequestInit): Promise<TaskBoardSnapshot> {
+  private async request<T>(url: string, init: RequestInit): Promise<T> {
     const controller = new AbortController()
     const timeout = globalThis.setTimeout(() => { controller.abort() }, REQUEST_TIMEOUT_MS)
     try {
-      return await readJson<TaskBoardSnapshot>(await fetch(url, { ...init, signal: controller.signal }))
+      return await readJson<T>(await fetch(url, {
+        ...init,
+        headers: { ...(init.headers as Record<string, string> | undefined), [BOARD_SCOPE_HEADER]: LIVE_SCOPE },
+        signal: controller.signal,
+      }))
     } catch (error) {
       if (controller.signal.aborted) throw new Error(`task-board Host request timed out after ${REQUEST_TIMEOUT_MS / 1_000}s`)
       throw error

@@ -116,16 +116,21 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   const [showNew, setShowNew] = useState(false)
   const selected = selectedTaskOf(snapshot)
   const archiveView = snapshot.archiveView
-  // Archived tasks leave the columns; the archive view shows them instead.
-  const visible = snapshot.tasks.filter(task =>
-    (archiveView ? task.archivedAt !== undefined : task.archivedAt === undefined)
-    && matchesFilter(task, filter),
-  )
+  const archive = snapshot.archive
+  // Archived cards leave the columns. They are NOT a filter over the board
+  // payload any more (方案 §8 #5 ④): after the physical archive migration they
+  // live in batches and arrive through the archive routes, one page at a time.
+  const visible = archiveView
+    ? archive.tasks.filter(task => matchesFilter(task, filter))
+    : snapshot.tasks.filter(task => task.archivedAt === undefined && matchesFilter(task, filter))
   const lineGroups = groupByLine(visible)
   // Same filter as the columns, opposite archive flag: the badge counts the
-  // line's archived cards, which never appear as columns of their own.
+  // line's archived cards, which never appear as columns of their own. It can
+  // only see the archive pages loaded so far — the archive view is what pages
+  // through the rest (the "归档 (N)" badge carries the full total from the
+  // batch index instead).
   const lineArchiveCounts = countArchivedByLine(
-    snapshot.tasks.filter(task => matchesFilter(task, filter)),
+    archive.tasks.filter(task => matchesFilter(task, filter)),
   )
   const openTask = useCallback((id: string): void => { controller.openTask(id) }, [controller])
 
@@ -181,7 +186,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
         >
           {archiveView
             ? t('board.backToBoard')
-            : t('board.archiveView', { count: String(snapshot.tasks.filter(task => task.archivedAt !== undefined).length) })}
+            : t('board.archiveView', { count: String(archive.total) })}
         </button>
         <button
           type="button"
@@ -210,10 +215,36 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
               <span className={css.columnCount}>{visible.length}</span>
             </header>
             <div className={css.cards}>
+              {archive.error !== undefined && (
+                <div className={css.formError} data-dsh-part="archive-error">
+                  {t('archive.loadError', { error: archive.error })}{' '}
+                  <button type="button" className={css.linkButton} onClick={() => { void controller.refreshArchive() }}>
+                    {t('archive.retry')}
+                  </button>
+                </div>
+              )}
               {visible.map(task => (
                 <MemoTaskCard key={task.id} task={task} pending={snapshot.pendingTaskIds.includes(task.id)} timeZone={snapshot.host?.scheduler.timeZone} showStatus onOpen={openTask} />
               ))}
-              {visible.length === 0 && <div className={css.columnEmpty}>{t('archive.empty')}</div>}
+              {visible.length === 0 && archive.error === undefined && !archive.loading && (
+                <div className={css.columnEmpty}>{t('archive.empty')}</div>
+              )}
+              {archive.loading && <div className={css.columnEmpty}>{t('archive.loading')}</div>}
+              {archive.total > 0 && (
+                <div className={css.columnEmpty} data-dsh-part="archive-progress">
+                  {t('archive.loaded', { loaded: String(archive.tasks.length), total: String(archive.total) })}
+                </div>
+              )}
+              {archive.hasMore && !archive.loading && (
+                <button
+                  type="button"
+                  className={css.ghostButton}
+                  data-dsh-part="archive-load-more"
+                  onClick={() => { void controller.loadMoreArchive() }}
+                >
+                  {t('archive.loadMore', { count: String(Math.max(0, archive.total - archive.tasks.length)) })}
+                </button>
+              )}
             </div>
           </section>
         ) : view === 'line' ? (

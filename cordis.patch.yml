@@ -6,10 +6,11 @@
 # upstream): human acceptance gate (`review`), card kinds
 # (once/recurring/interactive), and editable notes on executed cards.
 #
-# The row is a bare plugin by package name: the node half (exports ".") runs
-# in the host process (the system-prompt announcement section), and the
-# `dsh.client` declaration in package.json makes the browser half
-# (exports "./client", served at /plugins/<id>/client.js) load in the web GUI.
+# 🔴 The inserted row is addressed by the **published** package name. A bare
+# `dsh-task-board-local` here would leave the row unresolvable in a profile
+# installed from the registry (`@kira905/dsh-task-board-local`), i.e. the host
+# half never mounts and `/api/task-board/*` answers `not found` while the
+# browser half still loads — keep this string identical to `package.json#name`.
 - insert:
     - id: ui-task-board-local
       name: '@kira905/dsh-task-board-local'

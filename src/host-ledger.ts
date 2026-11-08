@@ -1,16 +1,39 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
+// R-065 删除/搬移三件套（锁6 · 批 E4）：唯一口在本插件内自足实现（插件实体不能静态 import tools/lib）。
+import { gateDestructive } from './destructive-gate.ts'
+// 2026-11-09 卡「账本写重试」：tmp → rename 统一走带退避重试的唯一口（EPERM/EACCES/EBUSY）。
+import { isTmpPreserved, renameWithRetry } from './fs-atomic.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { parseLedger } from './core/store.ts'
 import { canMoveManually, confirmedStatus, isInteractiveTask, retainRecentExecutions, settleExecution, startExecution, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
-import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
+import { applyArchiveManyMove, applyArchiveMove, applyRestoreFromBatch, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
 import { applyDeleteTask } from './core/use-cases/task-delete.ts'
 import { applySetSchedule, applyScheduleNextRun } from './core/use-cases/task-schedule.ts'
 import { applyUpdateTask, canEditDescription, canEditTaskIdentity, hasIdentityPatch } from './core/use-cases/task-update.ts'
+import {
+  applyArchiveCleanup as applyCleanupPlan,
+  findArchiveBatch,
+  findBatchIdForCard,
+  makeBatchId,
+  planArchiveCleanup as planCleanup,
+  readArchiveIndex,
+  readBatchCards,
+  removeCardsFromBatch,
+  summarizeArchive,
+  writeArchiveBatch,
+  type ArchiveBatchIndexEntry,
+  type ArchiveCleanupPlan,
+  type ArchiveCleanupResult,
+  type ArchiveStageHook,
+  type ArchiveStatusSummary,
+} from './host-archive-store.ts'
+import { appendQueueEvent } from './host-inbox.ts'
 import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts'
 
 interface PersistedScheduler extends TaskBoardSchedulerSnapshot {
@@ -63,6 +86,9 @@ export interface LedgerRuntimeView {
 }
 
 const MAX_REQUEST_CACHE = 256
+
+/** 启动恢复路径写进 `ExecutionRecord` 与事件信箱的同一个原因串（一处定义，别抄两遍）。 */
+const INTERRUPTED_START_REASON = 'execution interrupted: host restarted before the execution session was recorded'
 
 /**
  * Extra `scheduler` fields contributed by a load that VALIDATED.
@@ -285,19 +311,43 @@ function parseHostTasks(values: readonly unknown[]): TaskRecord[] {
   })
 }
 
+/**
+ * Construction options for card [看板瘦身·K1].
+ *
+ * `archiveStageHook` is a TEST seam: the fixed write order of an archive batch
+ * (方案 §3 D-2) has to be interrupted between its steps to prove the crash
+ * story (J11), and a crash drill needs a place to die that is not a `catch`
+ * block in production code. Production never passes it.
+ */
+export interface HostTaskLedgerOptions {
+  archiveStageHook?: ArchiveStageHook
+}
+
 export class HostTaskLedger {
   private document: LedgerDocument
   private readonly listeners = new Set<() => void>()
   private readonly requestCache = new Map<string, CachedRequest>()
   private readonly lockToken = crypto.randomUUID()
   private lockFd: number | undefined
+  /** Board directory: the archive store hangs off it (方案 §3 D-1). */
+  private readonly boardDir: string
+  /** Host name stamped into every batch manifest, so a synced batch says where it came from. */
+  private readonly archiveHost: string
+  private readonly archiveStageHook: ArchiveStageHook | undefined
   readonly file: string
   readonly lockFile: string
   /** Small sidecar for the 30 s scheduler heartbeat (lastTickAt only). */
   readonly schedulerFile: string
 
-  constructor(dir: string = join(dshHome(), 'task-board'), private readonly now: () => number = Date.now) {
+  constructor(
+    dir: string = join(dshHome(), 'task-board'),
+    private readonly now: () => number = Date.now,
+    options: HostTaskLedgerOptions = {},
+  ) {
     mkdirSync(dir, { recursive: true })
+    this.boardDir = dir
+    this.archiveHost = hostname()
+    this.archiveStageHook = options.archiveStageHook
     this.file = join(dir, 'ledger-v2.json')
     this.lockFile = join(dir, 'ledger-v2.lock')
     this.schedulerFile = join(dir, 'scheduler-v2.json')
@@ -389,10 +439,101 @@ export class HostTaskLedger {
     closeSync(fd)
     try {
       const owner = JSON.parse(readFileSync(this.lockFile, 'utf8')) as { token?: unknown }
-      if (owner.token === this.lockToken) unlinkSync(this.lockFile)
+      if (owner.token === this.lockToken) gateDestructive({ targets: [{ path: this.lockFile, label: 'ledger lock' }], whitelist: [dirname(this.lockFile)], op: '删', reason: '释放账本锁（token 匹配）', action: () => unlinkSync(this.lockFile) })
     } catch {
       // A missing or externally replaced lock must not be removed blindly.
     }
+  }
+
+  /**
+   * Read-only archive summary (batches / cards / bytes / damaged directories).
+   * Card [看板瘦身·K1]: feeds the board panel and the CLI.
+   */
+  archiveStatus(): ArchiveStatusSummary {
+    return summarizeArchive(this.boardDir)
+  }
+
+  /**
+   * Batch rows of `archive-index.json`, in batch order (方案 §3 D-4).
+   *
+   * `readArchiveIndex` is the cache-with-rebuild reader built in K1: a missing
+   * or stale index is rewritten from the manifests rather than trusted, so a
+   * broken cache can never hide a batch from a reader.
+   */
+  archiveBatches(): ArchiveBatchIndexEntry[] {
+    return readArchiveIndex(this.boardDir).batches
+  }
+
+  /**
+   * Every archived card, batch by batch (方案 §3 D-10 option (a)).
+   *
+   * Read on demand, never cached: the batches are the archive, and a stale
+   * in-memory copy would resurrect a card the user just deleted from a batch.
+   */
+  archivedCards(): TaskRecord[][] {
+    return this.archiveBatches().map(entry => readBatchCards(this.boardDir, entry.batchId))
+  }
+
+  /** One batch's index row, or undefined when the batch does not exist. */
+  batchEntry(batchId: string): ArchiveBatchIndexEntry | undefined {
+    return findArchiveBatch(this.boardDir, batchId)
+  }
+
+  /** Cards stored in one batch (empty when the batch file is unreadable). */
+  batchCards(batchId: string): TaskRecord[] {
+    return readBatchCards(this.boardDir, batchId)
+  }
+
+  /**
+   * Dry-run plan for the orphan-batch cleanup (方案 §3 D-2).
+   *
+   * An "orphan" is a batch whose cards are ALL still in the main ledger: the
+   * batch files were written but the main-ledger commit never happened, which
+   * is the only half-finished state the fixed write order can leave behind.
+   * A batch whose cards are gone from the main ledger is healthy and is never
+   * planned for removal. Nothing is written here — the default is a dry run.
+   */
+  planArchiveCleanup(): ArchiveCleanupPlan {
+    return planCleanup(this.boardDir, new Set(this.document.tasks.map(task => task.id)))
+  }
+
+  /**
+   * Execute a cleanup plan. Callers reach this only through an explicit
+   * `--apply`; the plan itself is the dry run.
+   * @param plan - defaults to a freshly computed {@link planArchiveCleanup}.
+   */
+  runArchiveCleanup(plan: ArchiveCleanupPlan = this.planArchiveCleanup()): ArchiveCleanupResult {
+    return applyCleanupPlan(this.boardDir, plan, this.now())
+  }
+
+  /**
+   * Physical half of an archive action (方案 §3 D-2).
+   *
+   * The batch is written FIRST (cards.json -> manifest.json -> index) and the
+   * main ledger is only rewritten once every batch file is on disk, so no
+   * instant exists in which a card is in neither place. A throw here leaves
+   * `this.document.tasks` untouched, and the caller's commit never runs.
+   * @returns the batch id that was created.
+   */
+  private persistArchiveBatch(
+    remaining: readonly TaskRecord[],
+    moved: readonly TaskRecord[],
+    tool: string,
+    now: number,
+  ): string {
+    if (moved.length === 0) throw new Error('no task can be archived')
+    const batchId = makeBatchId(tool === 'archive-compact' ? 'compact' : 'archive', now, this.boardDir)
+    writeArchiveBatch(this.boardDir, {
+      batchId,
+      at: now,
+      tasks: moved,
+      fromRevision: this.document.revision,
+      tool,
+      host: this.archiveHost,
+      ...(this.archiveStageHook === undefined ? {} : { onStage: this.archiveStageHook }),
+    })
+    this.document.tasks = [...remaining]
+    return batchId
   }
 
   applyRequest(requestId: string, action: TaskBoardAction): { state: LedgerState; run?: OpenedRun } {
@@ -468,15 +609,56 @@ export class HostTaskLedger {
   }
 
   settle(taskId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled' | 'interrupted', error?: string): void {
+    const now = this.now()
+    // 只有「这条执行记录此刻还是 open」才算一次**真结算**（`settleExecution` 对未知 id /
+    // 已结束的记录是 no-op）—— 事件必须跟着真实的状态变化走，别为一次空调用记一行假账。
+    const open = this.document.tasks
+      .find(task => task.id === taskId)?.executions
+      .find(execution => execution.id === executionId)
+    const settles = open !== undefined && open.endedAt === undefined
     this.document.tasks = this.document.tasks.map(task => task.id === taskId
-      ? settleExecution(task, executionId, outcome, this.now(), error)
+      ? settleExecution(task, executionId, outcome, now, error)
       : task)
     this.commit()
+    // 事件信箱（Q2 协议 v1）：结算是"这张卡真的走完一次执行"的唯一时刻，
+    // 就在这里记一行给队列消费端（`dsh-butler` → `queue-watch.mjs consumeInbox`）。
+    // 位置必须在 commit 之后（账本是真源），失败**不影响结算**（只留一行 stderr）。
+    if (!settles) return
+    const settled = this.document.tasks.find(task => task.id === taskId)
+    if (settled !== undefined) {
+      this.publishSettleEvent({ taskId: settled.id, status: settled.status, executionId, outcome, error }, now)
+    }
+  }
+
+  /**
+   * 结算事件写出（Q2 协议 v1 生产端）。**永不 throw**：成功返回 null，
+   * 失败返回消息由调用方 `console.error` 留痕 —— 卡的状态已提交，事件丢了也不能反向弄坏它。
+   *
+   * `now` 必须**用调用方那次结算的同一时刻**（不是墙钟）：消费端把 `at` 当"真实结算时刻"
+   * 做滞留基线，两者对不上就等于把基线写歪。
+   */
+  private publishSettleEvent(event: { taskId: string; status: string; executionId: string; outcome: string; error?: string | undefined }, now: number): void {
+    const failure = appendQueueEvent(dirname(this.boardDir), {
+      taskId: event.taskId,
+      kind: 'settled',
+      status: event.status,
+      executionId: event.executionId,
+      outcome: event.outcome,
+      error: event.error,
+    }, now)
+    if (failure !== null) {
+      console.error(`[dsh-task-board][inbox] queue-events.jsonl 写入失败（task=${event.taskId} · execution=${event.executionId}）：${failure}`)
+    }
   }
 
   private apply(action: TaskBoardAction): { state: LedgerState; run?: OpenedRun } {
     const now = this.now()
     let run: OpenedRun | undefined
+    // Deferred second half of a restore (方案 §3 D-3): the main ledger has to be
+    // committed BEFORE the batch copy is dropped, so a crash in between leaves a
+    // redundant batch copy (which the cleanup reports) instead of a card that
+    // exists nowhere.
+    let afterCommit: (() => void) | undefined
     switch (action.kind) {
       case 'import': {
         const sources = new Set(this.document.scheduler.importedSources ?? [])
@@ -554,7 +736,24 @@ export class HostTaskLedger {
       case 'delete':
         {
           const task = this.document.tasks.find(task => task.id === action.taskId)
-          if (task === undefined) throw new Error('task not found')
+          if (task === undefined) {
+            // Card [看板瘦身·K2] (the gap K1 §1.2 handed over): after the physical
+            // archive migration an archived card is not in the main ledger, so
+            // the plain `task not found` below turned the archive page's delete
+            // button into a dead end. Delete means the same thing wherever the
+            // card lives — remove it from its batch.
+            const batchId = findBatchIdForCard(this.boardDir, action.taskId)
+            const card = batchId === undefined
+              ? undefined
+              : readBatchCards(this.boardDir, batchId).find(item => item.id === action.taskId)
+            if (batchId === undefined || card === undefined) throw new Error('task not found')
+            if (card.status === 'running' || hasOpenExecution(card)) throw new Error('running task cannot be deleted')
+            // Dropped only after the (unchanged) main ledger commits, matching
+            // the restore ordering: a failure here leaves the card redundant,
+            // never lost, and the error still reaches the caller.
+            afterCommit = () => { removeCardsFromBatch(this.boardDir, batchId, [card.id], now) }
+            break
+          }
           if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be deleted')
         }
         this.document.tasks = [...applyDeleteTask(this.document.tasks, undefined, action.taskId).tasks]
@@ -569,15 +768,73 @@ export class HostTaskLedger {
         break
       }
       case 'archive': {
-        const result = applyArchiveTask(this.document.tasks, action.taskId, now)
+        // Card [看板瘦身·K1]: archiving is a physical move (方案 §3 D-2). The
+        // stamping rules are unchanged; the card simply leaves the main ledger
+        // for `archive/<batchId>/cards.json`.
+        const result = applyArchiveMove(this.document.tasks, action.taskId, now)
         if (!result.archived) throw new Error('task cannot be archived')
-        this.document.tasks = [...result.tasks]
+        this.persistArchiveBatch(result.tasks, result.moved, 'archive', now)
+        break
+      }
+      case 'archive-many': {
+        // Same rules as the single-card path, but one pass and one commit for
+        // the whole batch. Cards that are unknown / already archived / not
+        // settled are skipped instead of failing the batch; a card that was
+        // already moved into a batch is therefore a no-op (方案 §6 表 4).
+        const result = applyArchiveManyMove(this.document.tasks, action.taskIds, now)
+        if (!result.archived) throw new Error('no task can be archived')
+        this.persistArchiveBatch(result.tasks, result.moved, 'archive-many', now)
+        break
+      }
+      case 'archive-compact': {
+        // 方案 §3 D-5: one-time migration of every card still carrying the
+        // legacy in-ledger `archivedAt` marker into one batch, in board order.
+        // An empty batch is REFUSED — that refusal is also the idempotency
+        // short-circuit of a second run (方案 §6 表 4).
+        const archived = this.document.tasks.filter(task => task.archivedAt !== undefined)
+        if (archived.length === 0) throw new Error('no archived task to compact')
+        const remaining = this.document.tasks.filter(task => task.archivedAt === undefined)
+        this.persistArchiveBatch(remaining, archived, 'archive-compact', now)
         break
       }
       case 'restore': {
-        const result = applyRestoreTask(this.document.tasks, action.taskId, now)
-        if (!result.archived) throw new Error('task is not archived')
-        this.document.tasks = [...result.tasks]
+        const inLedger = this.document.tasks.find(task => task.id === action.taskId)
+        if (inLedger !== undefined && inLedger.archivedAt === undefined) {
+          // Idempotency (方案 §6 表 4): the card is already back on the board.
+          return { state: this.state() }
+        }
+        if (inLedger !== undefined) {
+          // Legacy in-ledger marker (data written before the physical move):
+          // clear it in place, exactly as before this card.
+          const result = applyRestoreTask(this.document.tasks, action.taskId, now)
+          if (!result.archived) throw new Error('task is not archived')
+          this.document.tasks = [...result.tasks]
+          break
+        }
+        // The card lives in a batch: locate it through the index's `ids[]`
+        // instead of scanning every batch file (方案 §7 环 C ②).
+        const batchId = findBatchIdForCard(this.boardDir, action.taskId)
+        const card = batchId === undefined
+          ? undefined
+          : readBatchCards(this.boardDir, batchId).find(item => item.id === action.taskId)
+        if (batchId === undefined || card === undefined) throw new Error('task is not archived')
+        this.document.tasks = [...this.document.tasks, applyRestoreFromBatch(card)]
+        afterCommit = () => { removeCardsFromBatch(this.boardDir, batchId, [card.id], now) }
+        break
+      }
+      case 'restore-many': {
+        // 方案 §3 D-3: move a whole batch back. Cards already on the board are
+        // left alone, and a batch with nothing left to restore is a pure no-op
+        // so a repeated call cannot bump the revision (方案 §5 J6).
+        const batch = findArchiveBatch(this.boardDir, action.batchId)
+        if (batch === undefined) throw new Error('archive batch not found')
+        const present = new Set(this.document.tasks.map(task => task.id))
+        const missing = readBatchCards(this.boardDir, action.batchId).filter(card => !present.has(card.id))
+        if (missing.length === 0) return { state: this.state() }
+        this.document.tasks = [...this.document.tasks, ...missing.map(card => applyRestoreFromBatch(card))]
+        afterCommit = () => {
+          removeCardsFromBatch(this.boardDir, action.batchId, missing.map(card => card.id), now)
+        }
         break
       }
       case 'set-schedule': {
@@ -599,12 +856,15 @@ export class HostTaskLedger {
         if (task?.archivedAt !== undefined) throw new Error('archived task is read-only')
         if (task === undefined || task.status === 'running' || hasOpenExecution(task)) throw new Error('task is already running or missing')
         const base = action.kind === 'rerun' ? withStatus(task, 'todo', now) : task
-        run = startExecution(base, now, crypto.randomUUID())
+        run = startExecution(base, now, crypto.randomUUID(), action.requester)
         this.document.tasks = this.document.tasks.map(item => item.id === task.id ? run!.task : item)
         break
       }
     }
     this.commit()
+    // Runs only after the main-ledger commit succeeded: a restore drops the
+    // batch copy last, so a crash here leaves redundancy, never loss.
+    if (afterCommit !== undefined) afterCommit()
     return { state: this.state(), ...(run === undefined ? {} : { run }) }
   }
 
@@ -641,15 +901,21 @@ export class HostTaskLedger {
    */
   private reconcileInterruptedStarts(persist = true): void {
     const now = this.now()
-    let changed = false
+    const interrupted: { taskId: string; status: string; executionId: string }[] = []
     this.document.tasks = this.document.tasks.map(task => {
       if (task.status !== 'running') return task
       const execution = task.executions.at(-1)
       if (execution === undefined || execution.endedAt !== undefined || execution.sessionId !== undefined) return task
-      changed = true
-      return settleExecution(task, execution.id, 'interrupted', now, 'execution interrupted: host restarted before the execution session was recorded')
+      const next = settleExecution(task, execution.id, 'interrupted', now, INTERRUPTED_START_REASON)
+      interrupted.push({ taskId: task.id, status: next.status, executionId: execution.id })
+      return next
     })
-    if (changed && persist) this.commit()
+    if (interrupted.length === 0) return
+    if (persist) this.commit()
+    // 重启打断同样是一次真实结算 ⇒ 同样记一行（G3「整夜被打断」场景的事件来源）。
+    for (const item of interrupted) {
+      this.publishSettleEvent({ ...item, outcome: 'interrupted', error: INTERRUPTED_START_REASON }, now)
+    }
   }
 
   private load(dir: string): LedgerDocument {
@@ -699,7 +965,10 @@ export class HostTaskLedger {
           : [],
       }
     } catch (error) {
-      if (existed) renameSync(this.file, `${this.file}.corrupt-${this.now()}-${process.pid}-${crypto.randomUUID()}`)
+      if (existed) {
+        const corruptPath = `${this.file}.corrupt-${this.now()}-${process.pid}-${crypto.randomUUID()}`
+        gateDestructive({ targets: [{ path: this.file, label: 'ledger file' }, { path: corruptPath, label: 'corrupt copy' }], whitelist: [dirname(this.file)], op: '搬移', reason: '账本损坏隔离（改名 .corrupt-*）', action: () => renameSync(this.file, corruptPath) })
+      }
       mkdirSync(dir, { recursive: true })
       return {
         schemaVersion: TASK_BOARD_SCHEMA_VERSION,
@@ -740,7 +1009,7 @@ export class HostTaskLedger {
       closeSync(fd)
       fd = undefined
       try { chmodSync(tmp, 0o600) } catch { /* Windows ACLs own access */ }
-      renameSync(tmp, this.schedulerFile)
+      gateDestructive({ targets: [{ path: tmp, label: 'scheduler tmp' }, { path: this.schedulerFile, label: 'scheduler file' }], whitelist: [dirname(this.schedulerFile)], op: '搬移', reason: '调度器状态原子写', action: () => renameWithRetry(tmp, this.schedulerFile) })
       try {
         const dirFd = openSync(dirname(this.schedulerFile), 'r')
         try { fsyncSync(dirFd) } finally { closeSync(dirFd) }
@@ -749,7 +1018,10 @@ export class HostTaskLedger {
       }
     } catch (error) {
       if (fd !== undefined) closeSync(fd)
-      try { unlinkSync(tmp) } catch { /* best-effort temporary cleanup */ }
+      // 重试耗尽仍失败 ⇒ renameWithRetry 已把 tmp 按约定留下取证（并打了 stderr），这里别再删。
+      if (!isTmpPreserved(error)) {
+        try { gateDestructive({ targets: [{ path: tmp, label: 'state tmp' }], whitelist: [dirname(tmp)], op: '删', reason: '状态原子写失败回收 tmp', action: () => unlinkSync(tmp) }) } catch { /* best-effort temporary cleanup */ }
+      }
       throw error
     }
     this.notify()
@@ -767,7 +1039,7 @@ export class HostTaskLedger {
       closeSync(fd)
       fd = undefined
       try { chmodSync(tmp, 0o600) } catch { /* Windows ACLs own access */ }
-      renameSync(tmp, this.file)
+      gateDestructive({ targets: [{ path: tmp, label: 'ledger tmp' }, { path: this.file, label: 'ledger file' }], whitelist: [dirname(this.file)], op: '搬移', reason: '账本提交（原子替换）', action: () => renameWithRetry(tmp, this.file) })
       try {
         const dirFd = openSync(dirname(this.file), 'r')
         try { fsyncSync(dirFd) } finally { closeSync(dirFd) }
@@ -776,7 +1048,10 @@ export class HostTaskLedger {
       }
     } catch (error) {
       if (fd !== undefined) closeSync(fd)
-      try { unlinkSync(tmp) } catch { /* best-effort temporary cleanup */ }
+      // 重试耗尽仍失败 ⇒ tmp 留着取证（renameWithRetry 已打 stderr），别当普通失败清掉。
+      if (!isTmpPreserved(error)) {
+        try { gateDestructive({ targets: [{ path: tmp, label: 'state tmp' }], whitelist: [dirname(tmp)], op: '删', reason: '账本写失败回收 tmp', action: () => unlinkSync(tmp) }) } catch { /* best-effort temporary cleanup */ }
+      }
       throw error
     }
     this.notify()
@@ -841,7 +1116,7 @@ export class HostTaskLedger {
             throw new Error(`task-board ledger is already owned by process ${pid}${hint}`)
           }
         }
-        try { unlinkSync(this.lockFile) } catch (unlinkError) {
+        try { gateDestructive({ targets: [{ path: this.lockFile, label: 'ledger lock' }], whitelist: [dirname(this.lockFile)], op: '删', reason: '抢占陈旧账本锁', action: () => unlinkSync(this.lockFile) }) } catch (unlinkError) {
           if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError
         }
       }

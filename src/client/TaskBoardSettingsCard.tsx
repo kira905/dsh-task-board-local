@@ -1,7 +1,9 @@
 /**
- * Task-board settings for availability, agent announcement, and optional Host
- * idle-sleep protection. Registers into the `web-ui.plugin.item` child slot
- * the Web UI plugin group renders, bound to the `task-board` namespace.
+ * Task-board settings for availability, agent announcement, optional Host
+ * idle-sleep protection, and the card-execution workspace fallback (D-3/D-3b,
+ * plan `卡会话独立工作区-方案-20260921.md` §3.3).
+ * Registers into the `web-ui.plugin.item` child slot the Web UI plugin group
+ * renders, bound to the `task-board` namespace.
  */
 
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -10,8 +12,8 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 import type { SettingsScope, SnapshotStore } from './client-faces.ts'
 import { useEffect, useRef, useState } from 'react'
 import type { TaskBoardPowerSnapshot } from '../protocol.ts'
-import { PluginSettingsCard, BooleanField } from './PluginSettingsCard.tsx'
-import { CardForm, booleanField, type CardActions, type CardShell, type FieldState as CardFieldState } from './settings-form.ts'
+import { PluginSettingsCard, BooleanField, ChoiceField } from './PluginSettingsCard.tsx'
+import { CardForm, booleanField, textField, type CardActions, type CardShell, type FieldState as CardFieldState } from './settings-form.ts'
 
 /** The task-board fields this card edits (the namespace's full schema). */
 export interface TaskBoardSettings {
@@ -21,6 +23,20 @@ export interface TaskBoardSettings {
   announceToAgent?: boolean
   /** Prevent host idle sleep while sessions run or schedules are armed. */
   preventIdleSleep?: boolean
+  /** D · default execution workspace id (empty = fallback disabled). */
+  defaultWorkspaceId?: string
+  /** M · main workspace id the built-in-card fallback matches against. */
+  mainWorkspaceId?: string
+  /** Switch for the built-in-card fallback. */
+  fallbackEnabled?: boolean
+}
+
+/** One selectable workspace in the card's two workspace pickers. */
+export interface WorkspaceOption {
+  /** Workspace id written into the setting. */
+  workspaceId: string
+  /** Dropdown label: the workspace title, falling back to its path. */
+  label: string
 }
 
 /** What the task-board card renders. */
@@ -31,6 +47,12 @@ export interface TaskBoardSettingsCardState extends CardShell {
   announceToAgent: CardFieldState
   /** Idle-system-sleep protection flag. */
   preventIdleSleep: CardFieldState
+  /** D · default execution workspace id. */
+  defaultWorkspaceId: CardFieldState
+  /** M · main workspace id. */
+  mainWorkspaceId: CardFieldState
+  /** Built-in-card fallback switch. */
+  fallbackEnabled: CardFieldState
 }
 
 /** The registration-side face the card's slot entry injects. */
@@ -38,6 +60,8 @@ export interface TaskBoardSettingsCardFace extends CardActions {
   hooks: {
     /** Card snapshot bound by the renderer as useTaskBoardSettingsCard. */
     taskBoardSettingsCard: SnapshotStore<TaskBoardSettingsCardState>
+    /** Workspaces the two pickers offer, bound as useTaskBoardWorkspaces. */
+    taskBoardWorkspaces: SnapshotStore<readonly WorkspaceOption[]>
   }
 }
 
@@ -45,13 +69,22 @@ export interface TaskBoardSettingsCardFace extends CardActions {
 export class TaskBoardSettingsCardController {
   private readonly form: CardForm<TaskBoardSettings>
   private readonly store: SnapshotStore<TaskBoardSettingsCardState>
+  private readonly workspaces: SnapshotStore<readonly WorkspaceOption[]>
 
-  /** @param scope - the bound settings scope for the `task-board` namespace. */
-  constructor(scope: SettingsScope<TaskBoardSettings>) {
+  /**
+   * @param scope - the bound settings scope for the `task-board` namespace.
+   * @param workspaces - live workspace options for the two pickers (the client
+   *   wiring feeds this from the runtime workspace list, never from the ledger).
+   */
+  constructor(scope: SettingsScope<TaskBoardSettings>, workspaces: SnapshotStore<readonly WorkspaceOption[]>) {
+    this.workspaces = workspaces
     this.form = new CardForm(scope, [
       booleanField('enabled'),
       booleanField('announceToAgent'),
       booleanField('preventIdleSleep'),
+      textField('defaultWorkspaceId'),
+      textField('mainWorkspaceId'),
+      booleanField('fallbackEnabled'),
     ])
     this.store = this.form.bind(() => this.projection())
   }
@@ -62,15 +95,21 @@ export class TaskBoardSettingsCardController {
       enabled: this.form.field('enabled'),
       announceToAgent: this.form.field('announceToAgent'),
       preventIdleSleep: this.form.field('preventIdleSleep'),
+      defaultWorkspaceId: this.form.field('defaultWorkspaceId'),
+      mainWorkspaceId: this.form.field('mainWorkspaceId'),
+      fallbackEnabled: this.form.field('fallbackEnabled'),
     }
   }
 
   /**
    * Build the face the card's slot registration injects.
-   * @returns the card's snapshot and its form actions.
+   * @returns the card's snapshot, its form actions, and the workspace options.
    */
   inject(): TaskBoardSettingsCardFace {
-    return { hooks: { taskBoardSettingsCard: this.store }, ...this.form.actions() }
+    return {
+      hooks: { taskBoardSettingsCard: this.store, taskBoardWorkspaces: this.workspaces },
+      ...this.form.actions(),
+    }
   }
 
   /**
@@ -96,6 +135,8 @@ export type TaskBoardSettingsCardProps =
 export function TaskBoardSettingsCard(props: TaskBoardSettingsCardProps) {
   const { t } = props
   const state = props.useTaskBoardSettingsCard(snapshot => snapshot)
+  const workspaces = props.useTaskBoardWorkspaces((list: readonly WorkspaceOption[]) => list)
+  const workspaceChoices = workspaces.map((option: WorkspaceOption) => ({ value: option.workspaceId, label: option.label }))
   const disabled = !state.writable
   const [power, setPower] = useState<TaskBoardPowerSnapshot | undefined>()
   const powerRef = useRef<HTMLParagraphElement | null>(null)
@@ -201,6 +242,45 @@ export function TaskBoardSettingsCard(props: TaskBoardSettingsCardProps) {
         onEdit={(text) => { props.edit('preventIdleSleep', text) }}
         onReset={() => { props.resetField('preventIdleSleep') }}
       />
+      {/* 卡执行工作区（D-3 / D-3b）：两个工作区下拉 + 一个回落开关。下拉只列
+          **运行时已注册**的工作区（id 写进设置），不猜"哪个是主工作区"。 */}
+      <ChoiceField
+        id="settings-task-board-default-workspace"
+        label={t('settings.defaultWorkspace')}
+        hint={t('settings.defaultWorkspaceHint')}
+        inheritLabel={t('settings.workspaceNone')}
+        choices={workspaceChoices}
+        {...fieldProps}
+        invalidLabel={t('settings.invalidWorkspace')}
+        {...state.defaultWorkspaceId}
+        onEdit={(text) => { props.edit('defaultWorkspaceId', text) }}
+        onReset={() => { props.resetField('defaultWorkspaceId') }}
+      />
+      <ChoiceField
+        id="settings-task-board-main-workspace"
+        label={t('settings.mainWorkspace')}
+        hint={t('settings.mainWorkspaceHint')}
+        inheritLabel={t('settings.workspaceNone')}
+        choices={workspaceChoices}
+        {...fieldProps}
+        invalidLabel={t('settings.invalidWorkspace')}
+        {...state.mainWorkspaceId}
+        onEdit={(text) => { props.edit('mainWorkspaceId', text) }}
+        onReset={() => { props.resetField('mainWorkspaceId') }}
+      />
+      <BooleanField
+        id="settings-task-board-workspace-fallback"
+        label={t('settings.fallbackEnabled')}
+        hint={t('settings.fallbackEnabledHint')}
+        inheritLabel={t('settings.inherit')}
+        onLabel={t('settings.on')}
+        offLabel={t('settings.off')}
+        {...fieldProps}
+        {...state.fallbackEnabled}
+        onEdit={(text) => { props.edit('fallbackEnabled', text) }}
+        onReset={() => { props.resetField('fallbackEnabled') }}
+      />
+      <p>{t('settings.workspaceFallbackNote')}</p>
       <p ref={powerRef}>
         {t('settings.powerStatus', {
           platform: power?.platform ?? t('settings.powerUnknown'),

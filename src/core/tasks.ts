@@ -43,6 +43,13 @@ export interface ExecutionRecord {
   id: string
   /** The dsh session that ran this attempt; absent until creation resolves. */
   sessionId: string | undefined
+  /**
+   * Who asked for this attempt (card [V2.9收口·窗口活], 2026-10-12): the
+   * caller's dsh session id as sent in `run` / `rerun` (`action.requester`).
+   * Optional and additive — cron-triggered openings and older callers leave it
+   * absent, so no ledger schema bump is needed.
+   */
+  requestedBy?: string
   /** When the run started (ms epoch). */
   startedAt: number
   /** When the run settled; absent while still running. */
@@ -306,10 +313,12 @@ export function startExecution(
   task: TaskRecord,
   now: number,
   executionId: string,
+  requester?: string,
 ): { task: TaskRecord; execution: ExecutionRecord } {
   const execution: ExecutionRecord = {
     id: executionId,
     sessionId: undefined,
+    requestedBy: requester,
     startedAt: now,
     endedAt: undefined,
     result: undefined,

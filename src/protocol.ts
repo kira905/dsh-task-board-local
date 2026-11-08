@@ -1,3 +1,4 @@
+import { isValidArchiveBatchId } from './core/archive-id.ts'
 import type { TaskUpdatePatch } from './core/use-cases/task-update.ts'
 import { isTaskKind, isTaskPermission, isTaskStatus, type NewTaskInput, type TaskRecord, type TaskStatus } from './core/tasks.ts'
 import { parseLedger } from './core/store.ts'
@@ -40,6 +41,55 @@ export interface TaskBoardEventPayload {
   power: TaskBoardPowerSnapshot
 }
 
+/**
+ * One batched archive row as `GET /archive` reports it (方案 §3 D-4).
+ *
+ * Carries `ids[]` (the by-card lookup written by K1) on purpose: a reader can
+ * then prove its paged walk of `GET /archive/<batchId>` was complete and
+ * duplicate-free (方案 §5 J8) without re-reading the batch file.
+ */
+export interface TaskBoardArchiveBatchSummary {
+  batchId: string
+  at: number
+  count: number
+  bytes: number
+  path: string
+  ids?: string[]
+  /** Set once every card of the batch has been restored (files are kept). */
+  restoredAt?: number
+}
+
+/** `GET /archive` page: batches plus board-wide reconciliation totals. */
+export interface TaskBoardArchiveIndexPage {
+  schemaVersion: 1
+  revision: number
+  batches: TaskBoardArchiveBatchSummary[]
+  totals: { batches: number; cards: number }
+  total: number
+  limit: number
+  offset: number
+  hasMore: boolean
+}
+
+/** `GET /archive/<batchId>` page: cards of one batch. */
+export interface TaskBoardArchiveCardsPage {
+  schemaVersion: 1
+  batchId: string
+  batch: TaskBoardArchiveBatchSummary
+  cards: TaskRecord[]
+  total: number
+  limit: number
+  offset: number
+  hasMore: boolean
+}
+
+/** Paging arguments accepted by the archive read routes. */
+export interface TaskBoardArchivePageQuery {
+  /** Page size; the server clamps it to 100 (方案 §5 J8). */
+  limit?: number
+  offset?: number
+}
+
 export type TaskBoardAction =
   | { kind: 'import'; sourceId: string; tasks: TaskRecord[] }
   | { kind: 'create'; id: string; input: NewTaskInput }
@@ -49,11 +99,31 @@ export type TaskBoardAction =
   | { kind: 'archive'; taskId: string }
   | { kind: 'restore'; taskId: string }
   | { kind: 'set-schedule'; taskId: string; patch: { enabled?: boolean; cron?: string } }
-  | { kind: 'run'; taskId: string }
-  | { kind: 'rerun'; taskId: string }
+  // Card [V2.9收口·窗口活]: `requester` (optional) records WHO asked for the
+  // run — the caller's dsh session id, written into the new execution record as
+  // `requestedBy`. Additive + optional: ledger schema version stays put and an
+  // old caller that omits it keeps working unchanged.
+  | { kind: 'run'; taskId: string; requester?: string }
+  | { kind: 'rerun'; taskId: string; requester?: string }
   // Local fork: the human acceptance gate over a settled execution.
   | { kind: 'confirm'; taskId: string }
   | { kind: 'reject'; taskId: string; note?: string }
+  // Local fork: one-commit batch archive for board cleanup. The per-card
+  // `archive` action rewrites and fsyncs the whole ledger on every call, so
+  // retiring a few hundred finished cards one by one stalls the Host event
+  // loop; this variant does the same work in a single commit.
+  //
+  // Card [看板瘦身·K1]: archiving is a PHYSICAL move. The stamped cards leave
+  // the main ledger and land in `task-board/archive/<batchId>/cards.json`
+  // (方案 §3 D-2), so a card that was already moved out is a no-op for a
+  // second archive request.
+  | { kind: 'archive-many'; taskIds: string[] }
+  // Card [看板瘦身·K1] (方案 §3 D-5): migrate every card that still carries an
+  // in-ledger `archivedAt` marker into one batch, without stopping dsh.
+  | { kind: 'archive-compact' }
+  // Card [看板瘦身·K1] (方案 §3 D-3): move a whole batch back onto the board.
+  // The batch id names a directory, so the wire parser validates its shape.
+  | { kind: 'restore-many'; batchId: string }
 
 export interface TaskBoardActionEnvelope {
   requestId: string
@@ -225,12 +295,27 @@ export function parseActionEnvelope(value: unknown): TaskBoardActionEnvelope | u
         requestId: envelope.requestId,
         action: { kind: 'reject', taskId, ...(action.note === undefined ? {} : { note: action.note }) },
       }
+    case 'archive-many': {
+      if (!exactKeys(action, ['kind', 'taskIds'])) return undefined
+      // 500 keeps the envelope well inside ACTION_LIMIT (64 KiB) even with
+      // uuid-length ids; the largest real cleanup batch is a few hundred.
+      if (!Array.isArray(action.taskIds) || action.taskIds.length === 0 || action.taskIds.length > 500) return undefined
+      if (!action.taskIds.every(id => typeof id === 'string' && id !== '' && id.length <= 256)) return undefined
+      return { requestId: envelope.requestId, action: { kind: 'archive-many', taskIds: [...action.taskIds] } }
+    }
+    case 'archive-compact':
+      if (!exactKeys(action, ['kind'])) return undefined
+      return { requestId: envelope.requestId, action: { kind: 'archive-compact' } }
+    case 'restore-many':
+      if (!exactKeys(action, ['kind', 'batchId'])) return undefined
+      if (!isValidArchiveBatchId(action.batchId)) return undefined
+      return { requestId: envelope.requestId, action: { kind: 'restore-many', batchId: action.batchId } }
     case 'delete':
     case 'archive':
     case 'restore':
     case 'run':
     case 'rerun':
-      if (!exactKeys(action, ['kind', 'taskId'])) return undefined
+      if (!exactKeys(action, ['kind', 'taskId', 'requester'])) return undefined
       return taskId === undefined ? undefined : { requestId: envelope.requestId, action: action as TaskBoardAction }
     default:
       return undefined

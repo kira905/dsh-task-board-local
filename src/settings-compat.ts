@@ -14,7 +14,7 @@
  * helper minus its own `ctx.inject(['settings'])` wrapper), so one probe covers
  * both lines and no code is duplicated per line.
  *
- * Two properties are load-bearing:
+ * Three properties are load-bearing:
  *
  * 1. **Nothing is imported statically from the package.** On 0.1.2+ a static
  *    named import of a removed export fails the module load itself: the loader
@@ -29,6 +29,15 @@
  *    optional: with no settings service composed the callback never runs, the
  *    plugin keeps working from its composition entry, and nothing throws or
  *    logs, because an entry-config-only deployment is a supported composition.
+ * 3. **The two hooks are the whole seam — the payload is simply `Config`.**
+ *    Every field the namespace grows reaches its consumer through the same
+ *    pair, with no branch added here: the card-execution workspace triple
+ *    (`defaultWorkspaceId` / `mainWorkspaceId` / `fallbackEnabled`, plan
+ *    `卡会话独立工作区-方案-20260921.md` §3.3) is a live example — it flows
+ *    through untouched and is applied by the consumer's own `onChange`
+ *    (`index.ts` `sync()` → `host.setConfiguration` → the runner). Putting
+ *    per-field logic in this file would make every future setting an edit to
+ *    the compatibility layer, which is exactly what this module exists to avoid.
  *
  * This module deliberately imports nothing from any package (its only package
  * dependencies are types), so the regression test can load it directly under
@@ -62,6 +71,16 @@ export interface SettingsSectionHooks {
  */
 export interface SettingsSeam {
   installSection?: (owner: Context, ns: string, schema: z<Config>, entry: Config, hooks: SettingsSectionHooks) => void
+  /**
+   * The 0.2.0 seam: the service no longer installs a caller-supplied section.
+   * It derives the settings form from the plugin's own Config and an entry's
+   * schema — only fields marked live (`meta.volatile`) appear, and the
+   * namespace IS the profile entry id — so the one registration left for a
+   * plugin is its page policy. `auto: false` means "the plugin owns its own
+   * page"; the returned value is a disposer when the implementation provides
+   * one.
+   */
+  configure?: (presentation: { auto?: boolean }, owner?: unknown) => unknown
 }
 
 /** The pre-0.1.2 module export of the same wiring, loaded only on that line. */
@@ -94,6 +113,10 @@ export function installSettingsCompat(
       seam.installSection(ctx, ns, schema, entry, hooks)
       return
     }
+    if (seam !== undefined && typeof seam.configure === 'function') {
+      installManagedForm(ctx, settingsCtx, seam, hooks)
+      return
+    }
     void import('@deepseek-ai/dsh-settings').then((mod) => {
       const legacy = (mod as SettingsModule).installSettingsSection
       if (typeof legacy !== 'function') return
@@ -102,4 +125,65 @@ export function installSettingsCompat(
       // No settings seam reachable: the composition entry stays authoritative.
     })
   })
+}
+
+/** The profile entry id behind a plugin context — the managed form's namespace. */
+function entryIdOf(ctx: Context): string | undefined {
+  const fiber = (ctx as unknown as { fiber?: { entry?: { options?: { id?: unknown }; id?: unknown } } }).fiber
+  const candidates = [fiber?.entry?.options?.id, fiber?.entry?.id]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate !== '') return candidate
+  }
+  return undefined
+}
+
+/**
+ * Register on the 0.2.0 managed-forms settings service.
+ *
+ * Two facts shape this branch:
+ *  - **No section is installed.** The service builds the form from the plugin's
+ *    own live Config fields, whose namespace is the profile entry id — not the
+ *    `ns` this plugin's older lines chose. Nothing here can change that, which
+ *    is why the composition entry still supplies the defaults and why the
+ *    browser half reads the entry id rather than a display name.
+ *  - **`configure` is the whole registration.** It declares the page policy
+ *    (`auto: false`: this plugin owns a page in the settings surface) and is
+ *    idempotent by contract only per instance — a second call throws — so it
+ *    goes through `ctx.effect` exactly once, and a throw is caught rather than
+ *    propagated: a settings-policy conflict must not fail the loader entry and
+ *    take the board down with it.
+ *
+ * Change notification comes from the service's own document event instead of a
+ * section-source swap: the consumer re-reads its (live) Config on every change.
+ * @param ctx - the plugin context (owner of the registration).
+ * @param settingsCtx - the context carrying the settings service.
+ * @param seam - the settings service.
+ * @param hooks - change notification sink; `setSource` stays unused here.
+ */
+function installManagedForm(
+  ctx: Context,
+  settingsCtx: Context,
+  seam: SettingsSeam,
+  hooks: SettingsSectionHooks,
+): void {
+  const configure = seam.configure
+  if (configure === undefined) return
+  const owner = (ctx as unknown as { fiber?: unknown }).fiber
+  settingsCtx.effect(() => {
+    try {
+      const dispose = configure.call(seam, { auto: false }, owner)
+      return typeof dispose === 'function' ? dispose as () => void : () => {}
+    } catch {
+      // Already configured for this instance (or refused): the form is still
+      // served from the live Config, so the entry keeps working.
+      return () => {}
+    }
+  }, 'task-board: settings page policy')
+  const entryId = entryIdOf(ctx)
+  settingsCtx.effect(() => settingsCtx.on('settings/document-updated', (updated?: unknown) => {
+    // Unknown entry id: notify on every document change. Re-reading the live
+    // Config is cheap and idempotent, and a missed change would leave the
+    // announcement and the workspace fallback stale until the next restart.
+    if (entryId === undefined || String(updated) === entryId) hooks.onChange()
+  }), 'task-board: settings document changes')
 }

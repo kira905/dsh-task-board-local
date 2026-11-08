@@ -18,12 +18,27 @@ import { applyCreateTask } from './use-cases/task-create.ts'
 import { applyDeleteTask } from './use-cases/task-delete.ts'
 import { applyScheduleNextRun as applyScheduleRollForward, applySetSchedule } from './use-cases/task-schedule.ts'
 import { applyUpdateTask, type TaskUpdatePatch } from './use-cases/task-update.ts'
-import type { TaskBoardAction, TaskBoardEventPayload, TaskBoardSnapshot } from '../protocol.ts'
+import {
+  type TaskBoardAction,
+  type TaskBoardArchiveBatchSummary,
+  type TaskBoardArchiveCardsPage,
+  type TaskBoardArchiveIndexPage,
+  type TaskBoardArchivePageQuery,
+  type TaskBoardEventPayload,
+  type TaskBoardSnapshot,
+} from '../protocol.ts'
+
+/** Cards pulled per archive read; mirrors the server's own 100-card page cap. */
+const ARCHIVE_PAGE_SIZE = 100
 
 export interface TaskBoardTransport {
   bootstrap(legacy: readonly TaskRecord[]): Promise<TaskBoardSnapshot>
   state(): Promise<TaskBoardSnapshot>
   action(action: TaskBoardAction): Promise<TaskBoardSnapshot>
+  /** Batch list of the physical archive (方案 §3 D-4). */
+  archiveBatches(page?: TaskBoardArchivePageQuery): Promise<TaskBoardArchiveIndexPage>
+  /** One page of one batch's cards (方案 §3 D-4). */
+  archiveCards(batchId: string, page?: TaskBoardArchivePageQuery): Promise<TaskBoardArchiveCardsPage>
   subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void
 }
 
@@ -72,12 +87,35 @@ export interface ExecutionOptionsSnapshot {
   presets: readonly ExecutionPresetOption[]
 }
 
+/**
+ * Archive view state (方案 §8 #5 ①).
+ *
+ * The archived cards used to be a client-side filter over the same `/state`
+ * payload. After the physical archive migration they are not in that payload
+ * at all, so the view owns its own collection, fed by `GET /archive` and paged
+ * through `GET /archive/<batchId>`.
+ */
+export interface ArchiveViewState {
+  /** Batch rows of the current archive index. */
+  batches: readonly TaskBoardArchiveBatchSummary[]
+  /** Cards pulled so far, in batch order. */
+  tasks: readonly TaskRecord[]
+  /** Server-reported number of archived cards across all batches. */
+  total: number
+  /** More cards are waiting to be paged in. */
+  hasMore: boolean
+  loading: boolean
+  error?: string
+}
+
 /** Immutable controller snapshot for UI subscriptions. */
 export interface ControllerSnapshot {
   tasks: readonly TaskRecord[]
   boardOpen: boolean
   /** True when the board shows the archive view instead of the columns. */
   archiveView: boolean
+  /** Archived cards + batch rows; independent of {@link tasks} (方案 §8 #5). */
+  archive: ArchiveViewState
   selectedTaskId: string | undefined
   /** Picker option sets (workspace list + agent-preset roster). */
   executionOptions: ExecutionOptionsSnapshot
@@ -86,10 +124,11 @@ export interface ControllerSnapshot {
   host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power'>
 }
 
-/** The selected task (resolved from the ledger), or undefined. */
+/** The selected task (main board first, then the archive view), or undefined. */
 export function selectedTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined {
   if (snapshot.selectedTaskId === undefined) return undefined
   return snapshot.tasks.find(task => task.id === snapshot.selectedTaskId)
+    ?? snapshot.archive.tasks.find(task => task.id === snapshot.selectedTaskId)
 }
 
 function randomUuid(): string {
@@ -125,6 +164,15 @@ export class BoardController {
   private tasks: TaskRecord[] = []
   private boardOpen = false
   private archiveView = false
+  /** Archived cards, loaded from the archive routes (never a filter over {@link tasks}). */
+  private archiveTasks: TaskRecord[] = []
+  private archiveBatches: TaskBoardArchiveBatchSummary[] = []
+  private archiveTotal = 0
+  private archiveHasMore = false
+  private archiveLoading = false
+  private archiveError: string | undefined
+  /** Read cursor into {@link archiveBatches}: which batch, which offset inside it. */
+  private archiveCursor = { batchIndex: 0, offset: 0 }
   private selectedTaskId: string | undefined
   private executionOptions: ExecutionOptionsSnapshot = { workspaces: [], presets: [] }
   private listeners = new Set<() => void>()
@@ -185,6 +233,14 @@ export class BoardController {
       tasks: this.tasks,
       boardOpen: this.boardOpen,
       archiveView: this.archiveView,
+      archive: {
+        batches: this.archiveBatches,
+        tasks: this.archiveTasks,
+        total: this.archiveTotal,
+        hasMore: this.archiveHasMore,
+        loading: this.archiveLoading,
+        ...(this.archiveError === undefined ? {} : { error: this.archiveError }),
+      },
       selectedTaskId: this.selectedTaskId,
       executionOptions: this.executionOptions,
       pendingTaskIds: [...this.pendingTaskIds],
@@ -217,6 +273,10 @@ export class BoardController {
     // updates of the already-selected session.
     this.lastCurrent = currentOf(this.deps.sessions)
     this.boardOpen = true
+    // The archive badge must be right without opening the archive view: the
+    // batch index alone carries the total (cheap), while the cards themselves
+    // are only paged in when the archive view is actually shown.
+    if (this.deps.transport !== undefined) void this.refreshArchiveIndex()
     this.syncRemoteStream()
     this.notify()
   }
@@ -250,18 +310,141 @@ export class BoardController {
    * Switch between the kanban columns and the archive view. Leaving the
    * archive view with an archived task still selected closes the selection —
    * the detail overlay must not linger over a task that is off-board.
+   * Opening the view loads it from the archive routes (方案 §8 #5 ④).
    */
   toggleArchiveView(): void {
     this.archiveView = !this.archiveView
     if (!this.archiveView && this.selectedTaskId !== undefined) {
       const selected = this.tasks.find(task => task.id === this.selectedTaskId)
-      if (selected?.archivedAt !== undefined) this.selectedTaskId = undefined
+      if (selected === undefined || selected.archivedAt !== undefined) this.selectedTaskId = undefined
     }
+    if (this.archiveView) void this.loadArchive(true)
     this.notify()
   }
 
+  // --- archive view -----------------------------------------------------------
+
+  /** Refresh the archive view from the beginning (batch list + first page). */
+  async refreshArchive(): Promise<boolean> {
+    return await this.loadArchive(true)
+  }
+
+  /** Pull the next page of archived cards. */
+  async loadMoreArchive(): Promise<boolean> {
+    return await this.loadArchive(false)
+  }
+
+  /**
+   * Re-read just the batch index — enough for the "归档 (N)" badge and for the
+   * per-line archived counts of whatever cards are already loaded. Failures are
+   * kept in `archive.error` rather than thrown at the caller.
+   */
+  async refreshArchiveIndex(): Promise<boolean> {
+    const transport = this.deps.transport
+    if (transport === undefined) return false
+    try {
+      const index = await transport.archiveBatches()
+      this.archiveBatches = index.batches
+      this.archiveTotal = index.totals.cards
+      this.archiveError = undefined
+      this.notify()
+      return true
+    } catch (error) {
+      this.archiveError = messageOf(error)
+      this.notify()
+      return false
+    }
+  }
+
+  /**
+   * Read the archive through its own routes (方案 §3 D-4 / §8 #5 ④).
+   *
+   * `reset` re-reads the batch index and starts from the first card; otherwise
+   * the next page is appended. Pages are filled across batch boundaries, so the
+   * view reads as one continuous list even though the wire is per-batch.
+   * Every failure is kept in `archive.error` — the archive view must never
+   * look simply empty when it could not be read.
+   */
+  private async loadArchive(reset: boolean): Promise<boolean> {
+    const transport = this.deps.transport
+    if (transport === undefined) {
+      // Legacy in-memory path (no Host): the store still holds archive markers.
+      this.archiveTasks = this.tasks.filter(task => task.archivedAt !== undefined)
+      this.archiveBatches = []
+      this.archiveTotal = this.archiveTasks.length
+      this.archiveHasMore = false
+      this.notify()
+      return true
+    }
+    if (this.archiveLoading) return false
+    this.archiveLoading = true
+    this.archiveError = undefined
+    this.notify()
+    try {
+      if (reset) {
+        const index = await transport.archiveBatches()
+        this.archiveBatches = index.batches
+        this.archiveTotal = index.totals.cards
+        this.archiveTasks = []
+        this.archiveCursor = { batchIndex: 0, offset: 0 }
+      }
+      const page = await this.readArchivePage(ARCHIVE_PAGE_SIZE)
+      this.archiveTasks = [...this.archiveTasks, ...page.cards]
+      this.archiveHasMore = page.hasMore
+      if (this.archiveTotal < this.archiveTasks.length) this.archiveTotal = this.archiveTasks.length
+      return true
+    } catch (error) {
+      this.archiveError = messageOf(error)
+      return false
+    } finally {
+      this.archiveLoading = false
+      this.notify()
+    }
+  }
+
+  /**
+   * Fill one in-memory page of up to `limit` cards by walking batches from the
+   * cursor. A batch boundary is transparent to the reader (方案 §5 J8 walks
+   * every batch and expects no duplicates and no gaps).
+   */
+  private async readArchivePage(limit: number): Promise<{ cards: TaskRecord[]; hasMore: boolean }> {
+    const transport = this.deps.transport
+    if (transport === undefined) return { cards: [], hasMore: false }
+    const cards: TaskRecord[] = []
+    let hasMore = false
+    while (cards.length < limit && this.archiveCursor.batchIndex < this.archiveBatches.length) {
+      const batch = this.archiveBatches[this.archiveCursor.batchIndex]!
+      const page = await transport.archiveCards(batch.batchId, {
+        limit: limit - cards.length,
+        offset: this.archiveCursor.offset,
+      })
+      cards.push(...page.cards)
+      if (page.hasMore) {
+        this.archiveCursor = { batchIndex: this.archiveCursor.batchIndex, offset: page.offset + page.cards.length }
+        hasMore = true
+        break
+      }
+      this.archiveCursor = { batchIndex: this.archiveCursor.batchIndex + 1, offset: 0 }
+      hasMore = this.archiveCursor.batchIndex < this.archiveBatches.length
+    }
+    return { cards, hasMore }
+  }
+
+  /** Drop a card from the archive view after it left its batch (restore/delete). */
+  private forgetArchivedCard(id: string): void {
+    if (!this.archiveTasks.some(task => task.id === id)) return
+    this.archiveTasks = this.archiveTasks.filter(task => task.id !== id)
+    if (this.archiveTotal > 0) this.archiveTotal -= 1
+    this.notify()
+  }
+
+  /**
+   * Open the detail overlay for a card. Archived cards live in their own
+   * collection (see {@link ArchiveViewState}), so the selection resolves
+   * against both the board and the archive view.
+   */
   openTask(id: string): void {
-    if (this.tasks.some(task => task.id === id)) {
+    if (this.tasks.some(task => task.id === id) || this.archiveTasks.some(task => task.id === id)) {
       this.selectedTaskId = id
       this.notify()
     }
@@ -330,9 +513,19 @@ export class BoardController {
     this.persistAndNotify()
   }
 
+  /**
+   * Delete a task — live or archived (K1 §1.2 hand-over).
+   *
+   * Before this card an archived card was in `this.tasks`, so the plain delete
+   * action worked; now it lives in a batch, and the Host looks it up there
+   * (a live card takes the original path). A refusal (running card, unknown id)
+   * surfaces as `transportError`, never as a silent no-op.
+   */
   deleteTask(id: string): void {
     if (this.deps.transport !== undefined) {
-      void this.commitRemote({ kind: 'delete', taskId: id }, id)
+      void this.commitRemote({ kind: 'delete', taskId: id }, id).then(deleted => {
+        if (deleted) this.afterCardLeftArchive(id)
+      })
       return
     }
     const { tasks, selectionCleared } = applyDeleteTask(this.tasks, this.selectedTaskId, id)
@@ -359,20 +552,39 @@ export class BoardController {
     return true
   }
 
-  /** Restore an archived task back onto the board (same status column). */
-  restoreTask(id: string): boolean {
-    const { tasks, archived } = applyRestoreTask(this.tasks, id, this.now())
-    if (!archived) return false
-    if (this.deps.transport !== undefined) {
-      void this.commitRemote({ kind: 'restore', taskId: id }, id).then(restored => {
-        if (restored && this.selectedTaskId === id) this.closeTask()
-      })
+  /**
+   * Restore an archived task back onto the board.
+   *
+   * Card [看板瘦身·K2] · 阻断 `L2-1`: the Host owns where a card lives, and after
+   * the physical archive migration an archived card is NOT in `this.tasks`. The
+   * former local pre-check (`applyRestoreTask` returns `applied === false` ⇒
+   * `return false`) therefore swallowed the click on the archive page: no
+   * request, no message, nothing on screen. The action is now sent
+   * unconditionally and a Host refusal surfaces through `transportError`
+   * (rendered by the board and the detail overlay).
+   * @returns true when the Host confirmed the restore.
+   */
+  async restoreTask(id: string): Promise<boolean> {
+    const transport = this.deps.transport
+    if (transport === undefined) {
+      const { tasks, archived } = applyRestoreTask(this.tasks, id, this.now())
+      if (!archived) return false
+      this.tasks = [...tasks]
+      this.forgetArchivedCard(id)
+      if (this.selectedTaskId === id) this.selectedTaskId = undefined
+      this.persistAndNotify()
       return true
     }
-    this.tasks = [...tasks]
+    const restored = await this.commitRemote({ kind: 'restore', taskId: id }, id)
+    if (restored) this.afterCardLeftArchive(id)
+    return restored
+  }
+
+  /** Shared post-restore/post-delete bookkeeping for the archive view. */
+  private afterCardLeftArchive(id: string): void {
+    this.forgetArchivedCard(id)
     if (this.selectedTaskId === id) this.selectedTaskId = undefined
-    this.persistAndNotify()
-    return true
+    if (this.archiveView) void this.loadArchive(true)
   }
 
   // --- scheduling ---------------------------------------------------------------
@@ -610,7 +822,9 @@ export class BoardController {
     const transport = this.deps.transport
     if (transport === undefined) return true
     try {
+      const before = this.hostState?.revision
       this.acceptRemote(await transport.state())
+      if (this.archiveView && this.hostState?.revision !== before) void this.loadArchive(true)
       if (preserveError !== undefined) {
         this.transportError = preserveError
         this.notify()
@@ -631,7 +845,9 @@ export class BoardController {
     this.tasks = [...snapshot.tasks]
     this.hostState = { revision: snapshot.revision, scheduler: snapshot.scheduler, power: snapshot.power }
     this.transportError = undefined
-    if (this.selectedTaskId !== undefined && !this.tasks.some(task => task.id === this.selectedTaskId)) {
+    if (this.selectedTaskId !== undefined
+      && !this.tasks.some(task => task.id === this.selectedTaskId)
+      && !this.archiveTasks.some(task => task.id === this.selectedTaskId)) {
       this.selectedTaskId = undefined
     }
     if (!this.archiveView && this.selectedTaskId !== undefined

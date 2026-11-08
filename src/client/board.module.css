@@ -4,116 +4,23 @@
  * board follows the active theme (light/dark and skins).
  */
 
-/* --- center-column takeover (global rules, attribute-scoped) ----------------- */
+/* --- panel host (main slot) -------------------------------------------------- */
 
-[data-pane='conversation'],
-[class*='centerCol'] {
-  position: relative;
-}
-
-/* The board container rides inside the conversation grid item as an extra
-   trailing child; hidden unless the board is active. */
+/* The shell renders this element as the `main` panel — the flex child that
+   fills the centre column (`display:flex; flex-direction:column;
+   overflow:hidden`). It must therefore take the remaining height, keep the
+   board's own scroll containers inside it, and carry the container query the
+   narrow layout keys on (that query used to hang off the old overlay). */
 [data-dsh-taskboard-view] {
-  position: absolute;
-  inset: 0;
-  display: none;
-  z-index: 60;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-base);
   container-name: task-board-view;
   container-type: inline-size;
-  /* Opaque backdrop: the conversation subtree stays mounted under the view.
-     Even if the hide rule below were defeated by a stronger host inline
-     style, this background keeps sticky code-block banners (host z-index 6)
-     from showing through the active board (issue #100). */
-  background: var(--dsw-alias-bg-base);
-}
-
-/* The center column is single-occupant; the :not() guards keep the two
-   sibling panels (task board / ssh) from fighting over visibility if both
-   activation attributes ever coexist. */
-html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [data-dsh-taskboard-view] {
-  display: block;
-}
-
-/* While the board is active, the conversation content underneath is hidden
-   (it stays mounted and stateful). The !important is required: the dsh shell
-   (0.1.0-rc.6) wraps the conversation view in a node with an inline
-   `display: contents`, and inline styles beat a plain stylesheet rule. Without
-   it the composer (input card) stays visible at the bottom and paints over the
-   board modals' footer, hiding the run/delete buttons (issue #76).
-   The rule targets both the pane attribute and the center-column class so the
-   chat subtree (including the code-block copy banner, issue #100) stays hidden
-   whichever host container carries it. */
-html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [data-pane='conversation'] > :not([data-dsh-taskboard-view]),
-html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] > :not([data-dsh-taskboard-view]) {
-  display: none !important;
-}
-
-/* --- sidebar entry row ------------------------------------------------------- */
-
-.entry {
-  box-sizing: border-box;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  display: inline-flex;
-  color: inherit;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.entry:hover {
-  /* base visuals come from the reused shell new-session class; nothing extra. */
-}
-
-.entry[data-active] {
-  background: var(--dsw-alias-button-floating-hover);
-  color: var(--dsw-alias-label-primary);
-  font-weight: 500;
-}
-
-.entryIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  flex: none;
-}
-
-.entryIcon svg {
-  display: block;
-  width: 14px;
-  height: 14px;
-}
-
-/* Collapsed rail: the shell renders its own icons at 18px there, so match it
-   (ported from patch-taskboard-icon-size). */
-[data-sidebar-collapsed] .entryIcon svg {
-  width: 18px;
-  height: 18px;
-}
-
-.entryLabel {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Collapsed rail: the reused shell new-session class handles the button's
-   size/icon; keep only alignment plus the open-highlight hover. */
-[data-sidebar-collapsed] .entry {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-[data-sidebar-collapsed] .entry[data-active]:hover {
-  background: var(--dsw-specific-sidebar-nav-item-active);
-}
-
-[data-sidebar-collapsed] .entryLabel {
-  display: none;
 }
 
 /* --- board frame -------------------------------------------------------------- */
@@ -1005,12 +912,6 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 /* Viewport-specific mobile treatment: overlays occupy the dynamic viewport,
    preserve notches/home indicators, and keep their action rows reachable. */
 @media (max-width: 768px) {
-  [data-dsh-taskboard-view] {
-    height: 100vh;
-    height: 100dvh;
-  }
-
-  .entry,
   .card,
   .primaryButton,
   .ghostButton,
@@ -1124,7 +1025,6 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
  * --------------------------------------------------------------------------- */
 
 /* --- one themed focus-visible ring (approx 2px, 2px offset) --- */
-.entry:focus-visible,
 .card:focus-visible,
 .primaryButton:focus-visible,
 .ghostButton:focus-visible,
@@ -1141,7 +1041,6 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 }
 
 /* --- unified 120ms motion across the board's interactive controls --- */
-.entry,
 .primaryButton,
 .ghostButton,
 .dangerButton,
@@ -1161,18 +1060,12 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   transform: translateY(0);
 }
 
-.entry:active,
 .primaryButton:active:not(:disabled),
 .ghostButton:active:not(:disabled),
 .dangerButton:active:not(:disabled),
 .iconButton:active:not(:disabled),
 .linkButton:active:not(:disabled) {
   transform: translateY(1px);
-}
-
-/* --- entry row (sidebar) states --- */
-.entry[data-active]:hover {
-  background: var(--dsw-specific-sidebar-nav-item-active);
 }
 
 /* --- guarded hover for the remaining icon/link buttons (defensive: never
@@ -1207,7 +1100,6 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 
 /* --- reduced motion: strip transitions, stop the decorative spinner --- */
 @media (prefers-reduced-motion: reduce) {
-  .entry,
   .card,
   .primaryButton,
   .ghostButton,

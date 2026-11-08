@@ -493,9 +493,11 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
               type="button"
               className={css.primaryButton}
               disabled={pending}
-              onClick={() => {
-                controller.restoreTask(current.id)
-              }}
+              // The request goes out unconditionally: an archived card is not in
+              // the board payload any more, so any local pre-check would swallow
+              // the click (方案 §8 #5 ② · 阻断 L2-1). A refusal shows up as the
+              // transport error banner above.
+              onClick={() => { void controller.restoreTask(current.id) }}
             >
               {t('detail.restore')}
             </button>

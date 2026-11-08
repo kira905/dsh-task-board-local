@@ -98,12 +98,14 @@ export interface SettingsScopeSpec<T> {
 /** Reactive owner handle over one namespace's durable section. */
 export interface SettingsScope<T> extends ObservableSnapshot<SettingsScopeSnapshot<T>> {
   /**
-   * Queue one field write. The two generations answer differently (`void` on
-   * the pre-0.2.0 scope, `boolean` acceptance on the 0.2.0 form), so the face
-   * stays open at `unknown` and the form model only awaits settlement — the
-   * bridge scope this plugin binds already reports success its own way.
+   * Queue one field write.
    * @param field - scalar field inside the namespace section.
    * @param value - JSON-shaped value selected by the user.
+   *
+   * The settlement is deliberately `unknown`: the pre-0.1.2 scope answers
+   * `void` while 0.2.0's `ConfigForm.set` answers the Host's acceptance
+   * (boolean). The card reads the accepted value back from the section either
+   * way, so accepting both here keeps one face for both lines.
    */
   set(field: string, value: unknown): Promise<unknown>
   /**
@@ -155,4 +157,20 @@ export interface SessionsFace {
 export interface WorkspacesFace {
   /** Registered workspaces. */
   list: ObservableSnapshot<{ items: readonly WorkspaceRow[] }>
+}
+
+/**
+ * Panel-navigation face behind `ctx.layout`, provided by the shell's layout
+ * plugin (`@deepseek-ai/dsh-client-ui-layout`, service name `layout`).
+ *
+ * Only the one action the board needs is modelled: leaving its panel. The face
+ * also carries geometry, sidebar toggling and the right column — none of which
+ * this plugin touches, and a modelled-but-unused method is a silent trap.
+ */
+export interface LayoutFace {
+  /**
+   * Select a global centre panel; `null` shows the Conversation again.
+   * @param panelId - a registered `main` key, or null for the Conversation.
+   */
+  selectPanel(panelId: string | null): void
 }

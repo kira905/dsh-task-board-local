@@ -23,10 +23,10 @@ import { transform } from 'lightningcss'
  *
  * 🔴 This MUST equal the published package name: the 0.2.0 host's
  * `dsh-client-modules` looks the registered factory up by **entry id = package
- * name** (`graphRow(id /* package name *\/)`), so an unscoped id would serve
- * HTTP 200 and still fail with `loaded without registering … via
- * __ModuleLoader__.load` — the plugin then never mounts (measured in the S16
- * isolated install). Keep it in sync with `package.json#name`.
+ * name** (`graphRow(id /* package name *\/)`), so an id that differs from the
+ * installed package name serves HTTP 200 and still fails with `loaded without
+ * registering … via __ModuleLoader__.load` — the plugin then never mounts
+ * (measured in the S16 isolated install). Keep it in sync with `package.json#name`.
  */
 const ID = '@kira905/dsh-task-board-local'
 
@@ -54,6 +54,10 @@ const CLIENT_EXTERNALS: readonly string[] = [
   'react',
   'react-dom/client',
   'react/jsx-runtime',
+  // 【adapter P3 · 2026-09-25】客户端适配层包：**必须保持 external**（rollup 只保留 require，
+  // 不 inline）。否则常量会被打进 bundle ⇒ 字面量又回到 lib/client.js（R4 复现），
+  // 且与宿主侧 `dsh.client.external` 声明的模块名对不上。配套声明见 package.json。
+  'dsh-host-adapter-client',
 ]
 
 /**
