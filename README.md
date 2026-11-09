@@ -20,7 +20,7 @@
 > ```powershell
 > dsh plugin --profile web add @kira905/dsh-task-board-local
 > ```
-> 装完重启一次 DSH，侧边栏出现「任务看板」。⚠️ 它是这一族里**唯一带运行时依赖**的一个（`schemastery`），不属于「全零依赖」那批。
+> 装完重启一次 DSH，侧边栏出现「任务看板」（`--profile web` 里的 `web` 就是放插件的那个格子：`~/.dsh/profiles/<名字>`；这是网页版，桌面版换成 `desktop`）。⚠️ 它是这一族里**唯一带运行时依赖**的一个（`schemastery`），不属于「全零依赖」那批。
 >
 > ### 它长什么样
 > 六列（待规划 / 待办 / 进行中 / 待验收 / 已完成 / 已失败）+ 一个「主线视图」按主线分列。⚠️ 本仓**暂无截图**，给一组自己机器上跑出来的真实读数（`GET /api/task-board/state`）：
