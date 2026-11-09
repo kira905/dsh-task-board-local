@@ -57,6 +57,9 @@ const CLIENT_EXTERNALS: readonly string[] = [
   // 【adapter P3 · 2026-09-25】客户端适配层包：**必须保持 external**（rollup 只保留 require，
   // 不 inline）。否则常量会被打进 bundle ⇒ 字面量又回到 lib/client.js（R4 复现），
   // 且与宿主侧 `dsh.client.external` 声明的模块名对不上。配套声明见 package.json。
+  // 【B13 · 2026-11-09】两个候选名都列上：scoped 是发布包名的注册 id（主路），裸名是私有树
+  // 旧环境的 fallback（见 src/client/index.ts 的 loadHostAdapter）。任一方存在都能外部化。
+  '@kira905/dsh-host-adapter-client',
   'dsh-host-adapter-client',
 ]
 

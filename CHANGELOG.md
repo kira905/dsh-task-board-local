@@ -11,6 +11,30 @@
   只能靠另写脚本兜底（谁只看权威器读数就会误判"已脱敏"）。**非功能变更**：不动扫描逻辑、词表、
   报告格式；只多扫一类文本文件。本仓 `package.json` 的 `files` 不含该脚本 ⇒ **不升版本、不发 npm**。
 
+## [1.2.1] - 2026-11-09
+
+### Fixed
+
+- 🔴 **桌面版起不来：客户端按裸名去找适配层 —— 已修**。`lib/client.js` 里对适配层的 `require`
+  写的是私有树的**裸名** `dsh-host-adapter-client`，而注册表装来的适配层
+  `@kira905/dsh-host-adapter-client@0.2.0` 的注册 id 是**带 scope** 的
+  （`window.__ModuleLoader__.load({ id: "@kira905/dsh-host-adapter-client" })`）⇒ 宿主注入的
+  `require` 按 id 查、裸名查不到 ⇒ 同步 require MISS ⇒ 整个 client entry 挂不上，宿主报
+  `web boot: 1 entry did not activate`，**桌面版直接起不来**（剔除看板后一切正常）。
+  本版把主路改成 scoped 注册 id，裸名降级为 `catch` 里的 fallback（老 profile 里那份本地件的
+  name 仍是不带 scope 的），两边都认；`package.json` 的 `dsh.client.external` 与
+  `tsdown.config.ts` 的 `CLIENT_EXTERNALS` 同步声明两个名字 —— 宿主按 external 排 boot graph，
+  写错名字那一行就排不上，同步 require 照样 MISS。
+- 两个名字都拿不到时（环境里根本没装适配层）抛一条**带两个候选名**的错，不再让调用点报
+  「`SVC` 是 undefined」这种看不出根因的错。
+
+### Changed
+
+- 无破坏性变更：包名、`engines`、`peerDependencies` 区间均不变。判据（重下的 tarball 现跑）：
+  `lib/client.js` 里 `require("@kira905/dsh-host-adapter-client")` 在位，裸名只出现在 `try` 块内。
+
+> 注：本文件缺 `1.2.0` 段 —— 该版发布时未在此处记录，变更见 git 提交 `397fd94`。
+
 ## [1.1.5] - 2026-10-19
 
 ### Fixed

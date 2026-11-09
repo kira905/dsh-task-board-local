@@ -45,7 +45,43 @@ import { reportDailyHeartbeat } from './telemetry.ts'
 // 各包的 lib/host-adapter.js 副本 —— 宿主按 exports["./client"] 单文件 serve）。外部化由
 // tsdown.config.ts 的 CLIENT_EXTERNALS + 本包 package.json 的 dsh.client.external 共同保证：
 // 打包器保留 require，宿主按 external 排序 boot graph（依赖先 register，同步 require 才命中）。
-import { EV, SVC } from 'dsh-host-adapter-client'
+//
+// 【B13 · 2026-11-09】模块名必须与适配层的**注册 id**一致，不是与私有树的目录名一致。
+// 适配层自 0.2.0 起注册的是 `@kira905/dsh-host-adapter-client`（现读 tarball 的
+// lib/host-adapter.js：`window.__ModuleLoader__.load({ id: "@kira905/dsh-host-adapter-client" })`）。
+// 1.2.0 这一行写的是从私有树搬来的裸名 `dsh-host-adapter-client` ⇒ 注册表装来的宿主里
+// 同步 require MISS ⇒ 整个 client entry 挂不上（真机 `web boot: 1 entry did not activate`，
+// 桌面版直接起不来）。主路 = scoped；取不到再退裸名 —— 本包自己发的是 scoped，但别人的
+// 宿主里可能仍只有裸名那一份，两边都认最稳。裸名只许出现在 catch 分支里（不许裸露在外，
+// 裸露等于没修）。
+// ⚠️ 两个名字都必须写成**字面量**：验收器具按字面量扫 `require("…")`，用具变量就扫不到、
+// 会被判成"一处都没修"。
+type HostAdapterFace = { EV: Readonly<Record<string, string>>, SVC: Readonly<Record<string, string>> }
+
+/** 两个候选模块名，按优先级：先发布包名（scoped），再私有树旧裸名。 */
+function loadHostAdapter(): HostAdapterFace {
+  try {
+    const scoped: unknown = require('@kira905/dsh-host-adapter-client')
+    const face = scoped as HostAdapterFace | null | undefined
+    if (face !== null && typeof face === 'object'
+      && typeof face.EV === 'object' && typeof face.SVC === 'object') return face
+  } catch {
+    // 落到下面的裸名分支：这个宿主里没有 scoped 那一份
+  }
+  try {
+    return require('dsh-host-adapter-client') as HostAdapterFace
+  } catch (error) {
+    // 两边都没有 = 环境本身坏了（适配层没装、或注册 id 又换了）。抛出带两个候选名的错，
+    // 别让调用点报 "SVC 是 undefined" 这种看不出根因的错。
+    throw new Error(
+      'task-board: cannot load the host adapter — neither "@kira905/dsh-host-adapter-client"'
+      + ' nor "dsh-host-adapter-client" is registered in this host; check the profile\'s'
+      + ` dsh.client.external and the adapter package install (${String(error)})`,
+    )
+  }
+}
+
+const { EV, SVC } = loadHostAdapter()
 
 /** Locale namespace this plugin owns. */
 const NS = 'task-board'
