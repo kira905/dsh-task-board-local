@@ -128,6 +128,27 @@ npm run build          # 产出 lib/index.js 与 lib/client.js
 - cron 是 5 段式，按 **Host 本地时区**；错过的触发点**不补跑**，`nextRunAt` 直接向前滚动。
 - 可选且**默认关闭**的空闲系统睡眠保护（`preventIdleSleep`）：只拦空闲系统睡眠，允许屏幕熄灭与锁屏，不承诺拦合盖/手动睡眠/休眠/关机。
 
+## 桌面端（Electron / `dsh-app://`）
+
+打包桌面外壳里整个看板 GUI 全是 `403` —— 这是 issue #1 的现场。原因：路由栅栏要求请求带
+`Sec-Fetch-Site: same-origin` 或一个 `Origin`，而 **Chromium 不会给非 http(s) 协议的请求加
+`Sec-Fetch-*`**，`dsh-app://` 的同源 fetch 也不带 `Origin` ⇒ 两个标记都没有 ⇒ 必拒。
+
+修法是一个**显式开关**，默认关闭：
+
+| 组合入口 | 开关 |
+|---|---|
+| `dsh web`（浏览器） | 不设 ⇒ **关**（行为与修前逐字节相同） |
+| Electron 桌面壳 | 启动时设 `DSH_TASK_BOARD_TRUST_DESKTOP_BRIDGE=1` |
+
+开关**只放行一种形状**：`Sec-Fetch-Site` 与 `Origin` **都不存在**的请求。任何带了其中一个的请求
+（远处网页一定至少带一个）照旧走原判据 —— **跨站 CSRF 面一点没放宽**。真实边界仍是
+loopback socket + Host +（可选）代理 token。
+
+为什么不做成设置页开关：它决定「哪些请求能碰到 Host 控制面」，属于**组合入口**的决定，不该让
+运行期的设置文档把它放宽（与 `trustedProxyHosts` 同一取舍）。程序化接入方也可直接给
+`makeTaskBoardRoutes(service, { trustDesktopBridge: true })`。
+
 ## 已知限制
 
 - 卡片执行消耗 API 额度，与普通 agent 会话相同。
@@ -254,6 +275,10 @@ npm run typecheck   # tsc --noEmit
 ```bash
 node --experimental-strip-types --experimental-transform-types _test/<name>.test.mjs
 ```
+
+`_test/desktop-bridge-trust.test.mjs` 是**桌面端栅栏**（issue #1）的回归夹具：23 条，逐行断言
+「裸请求 · 开关开→200 / 关→403」「`Origin: https://evil.example` · 开关开也 403」
+「`Sec-Fetch-Site: cross-site` · 开关开也 403」，外加非 loopback socket、缺 Host、非 GET 仍拒。
 
 **发布前脱敏扫描**（只读、可复跑；本仓自带）：
 

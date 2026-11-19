@@ -24,11 +24,31 @@ export const TASK_BOARD_PROXY_TOKEN_HEADER = 'x-dsh-task-board-proxy-token'
 export interface TaskBoardRouteAccess {
   trustedProxyHosts?: readonly string[]
   proxyToken?: string
+  /**
+   * Desktop-bridge trust (issue #1).
+   *
+   * Chromium does not attach `Sec-Fetch-*` to a request issued from a non
+   * http(s) scheme, and a same-origin fetch from a packaged shell (`dsh-app://`)
+   * carries no `Origin` either. Such a request therefore presents NEITHER
+   * browser marker and can never satisfy {@link browserSameOriginMarker}, so
+   * every Host call from the desktop shell answers 403.
+   *
+   * When true, a request carrying neither header is admitted on the unchanged
+   * loopback + Host + proxy fence. Anything that carries an `Origin` or a
+   * `Sec-Fetch-Site` — which is every request a remote page can make — is
+   * still judged by the original rules, so the cross-site CSRF surface does
+   * not widen.
+   *
+   * Default `false`: the `dsh web` composition never turns it on. Only a
+   * desktop adapter that knows its own scheme decides.
+   */
+  trustDesktopBridge?: boolean
 }
 
 interface ResolvedRouteAccess {
   trustedProxyHosts: ReadonlySet<string>
   proxyToken?: string
+  trustDesktopBridge?: boolean
 }
 
 function parseAuthority(authority: string): { canonical: string; url: URL } | undefined {
@@ -60,7 +80,7 @@ function resolveAccess(access: TaskBoardRouteAccess): ResolvedRouteAccess {
   if (trustedProxyHosts.size > 0 && (access.proxyToken === undefined || access.proxyToken === '')) {
     throw new Error('task-board: authenticated proxy hosts require a non-empty proxy token')
   }
-  return { trustedProxyHosts, ...(access.proxyToken === undefined ? {} : { proxyToken: access.proxyToken }) }
+  return { trustedProxyHosts, ...(access.proxyToken === undefined ? {} : { proxyToken: access.proxyToken }), trustDesktopBridge: access.trustDesktopBridge === true }
 }
 
 /**
@@ -68,10 +88,18 @@ function resolveAccess(access: TaskBoardRouteAccess): ResolvedRouteAccess {
  * header and is refused, but a curl with a forged Origin passes this too.
  * The real boundary is the loopback socket + Host + origin-equality checks
  * in isTrustedTaskBoardRequest below; do not rely on this marker alone.
+ *
+ * `trustDesktopBridge` (issue #1) admits exactly one extra shape: a request
+ * with NEITHER header, which is what a packaged desktop shell sends from its
+ * own non-http(s) scheme. A header that is present but carries another value
+ * (`cross-site`, `same-site`, `none`) is still refused, so a remote page — it
+ * always sends at least one marker — gains nothing from the switch.
  */
-function browserSameOriginMarker(req: IncomingMessage): boolean {
+function browserSameOriginMarker(req: IncomingMessage, trustDesktopBridge: boolean): boolean {
   const site = req.headers['sec-fetch-site']
-  return site === 'same-origin' || typeof req.headers.origin === 'string'
+  const origin = req.headers.origin
+  if (site === 'same-origin' || typeof origin === 'string') return true
+  return trustDesktopBridge && site === undefined && origin === undefined
 }
 
 function sameAuthority(req: IncomingMessage, host: URL): boolean {
@@ -102,7 +130,7 @@ function matchesToken(candidate: string | string[] | undefined, expected: string
  * internal token header after their own authentication step.
  */
 export function isTrustedTaskBoardRequest(req: IncomingMessage, access: ResolvedRouteAccess): boolean {
-  if (!browserSameOriginMarker(req)) return false
+  if (!browserSameOriginMarker(req, access.trustDesktopBridge === true)) return false
   if (isLoopbackRequest(req)) return true
   if (!isLoopbackAddress(req.socket.remoteAddress)) return false
   const host = req.headers.host

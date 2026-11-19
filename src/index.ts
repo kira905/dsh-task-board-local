@@ -95,6 +95,29 @@ const SECTION_ORDER = 200
 export const DEFAULT_PROXY_TOKEN_ENV = 'DSH_TASK_BOARD_PROXY_TOKEN'
 
 /**
+ * Environment variable that lets a packaged desktop shell opt into
+ * {@link TaskBoardRouteAccess.trustDesktopBridge} (issue #1).
+ *
+ * Deliberately an environment variable and NOT a config/settings field: the
+ * switch widens which requests reach the Host's control plane, so it belongs to
+ * the composition entry that knows its own scheme (`dsh-app://`), not to a
+ * settings document an operator can flip at runtime. Unset — the `dsh web`
+ * case — keeps the pre-fix behaviour byte for byte.
+ */
+export const TRUST_DESKTOP_BRIDGE_ENV = 'DSH_TASK_BOARD_TRUST_DESKTOP_BRIDGE'
+
+/**
+ * Read the desktop-bridge switch. Only an explicit `1`/`true` turns it on;
+ * every other value (including `0`, `false`, empty, unset) leaves it off.
+ * @param env - process environment (injectable for tests).
+ * @returns whether a header-less request may be admitted.
+ */
+export function resolveDesktopBridgeTrust(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env[TRUST_DESKTOP_BRIDGE_ENV]
+  return raw === '1' || raw === 'true'
+}
+
+/**
  * Static loader declarations.
  *
  * ⚠️ `apiProxy` is deliberately **absent** from this list (2026-09-14, card
@@ -431,7 +454,7 @@ function applyImpl(ctx: Context, config?: Config): void {
   ctx.effect(() => {
     const disposers: Array<() => void> = []
     try {
-      for (const route of makeTaskBoardRoutes(host, resolveProxyAccess(config))) disposers.push(ctx.webServer.register(route))
+      for (const route of makeTaskBoardRoutes(host, { ...resolveProxyAccess(config), trustDesktopBridge: resolveDesktopBridgeTrust() })) disposers.push(ctx.webServer.register(route))
     } catch (error) {
       for (const dispose of disposers) dispose()
       host.dispose()

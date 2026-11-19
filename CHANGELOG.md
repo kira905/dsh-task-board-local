@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 🔴 **桌面端（Electron `dsh-app://`）看板 GUI 全 403 —— 已修**（issue #1 · 外部上报）。
+  路由栅栏要求 `Sec-Fetch-Site: same-origin` 或一个 `Origin`，但 Chromium 不给非 http(s) 协议的请求
+  加 `Sec-Fetch-*`，`dsh-app://` 的同源 fetch 也不带 `Origin` ⇒ 桌面端两个标记都没有 ⇒ 必拒。
+  新增**显式开关** `TaskBoardRouteAccess.trustDesktopBridge`（默认 `false`；插件入口经
+  `DSH_TASK_BOARD_TRUST_DESKTOP_BRIDGE=1` 打开）：开关开着也只放行「`sec-fetch-site` 与 `origin`
+  **都不存在**」的请求，带其中任何一个的请求照旧走原判据 —— **跨站 CSRF 面没有放宽**。
+  `dsh web` 路径不设该变量 ⇒ 行为与修前逐字节相同。夹具 `_test/desktop-bridge-trust.test.mjs`（23 条）。
+
 ### 工具链（不影响使用者）
 
 - `scan-oss-sanitize.mjs` 的 `TEXT_EXT` 白名单补 `.py`：Python 件此前**根本进不了权威脱敏器射程**，
